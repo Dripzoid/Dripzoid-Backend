@@ -1,14 +1,19 @@
 // server/auth.js
-const express = require("express");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const sqlite3 = require("sqlite3").verbose();
-const path = require("path");
+import express from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import sqlite3 from "sqlite3";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const router = express.Router();
 
+// Resolve __dirname in ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 // Connect to DB
-const DB_PATH = path.join(__dirname, "../dripzoid.db");
+const DB_PATH = path.join(__dirname, "./dripzoid.db");
 const DB = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
     console.error("❌ Failed to connect to database:", err.message);
@@ -68,7 +73,7 @@ router.post("/register", (req, res) => {
               name: name || "",
               email,
               phone: phone || "",
-              is_admin: false, // ✅ Always boolean
+              is_admin: false,
             },
           });
         }
@@ -100,13 +105,13 @@ router.post("/login", (req, res) => {
       }
 
       const token = jwt.sign(
-        { id: user.id, is_admin: Boolean(user.is_admin) }, // ✅ Convert to boolean
+        { id: user.id, is_admin: Boolean(user.is_admin) },
         JWT_SECRET,
         { expiresIn: "7d" }
       );
 
       delete user.password;
-      user.is_admin = Boolean(user.is_admin); // ✅ Ensure boolean before sending
+      user.is_admin = Boolean(user.is_admin);
 
       return res.json({
         message: "Login successful",
@@ -120,5 +125,4 @@ router.post("/login", (req, res) => {
   });
 });
 
-
-module.exports = router;
+export default router;
