@@ -16,7 +16,8 @@
   "jsonwebtoken": "^9.0.0",
   "cloudinary": "^1.37.0",
   "ua-parser-js": "^1.0.37",
-  "multer": "^1.4.5-lts.1"
+  "multer": "^1.4.5-lts.1",
+  "csv-parser": "^3.0.0",
 },
   "keywords": [],
   "author": "",
