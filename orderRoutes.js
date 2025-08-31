@@ -1,7 +1,7 @@
 // routes/orderRoutes.js
 import express from "express";
-import db from "../db.js"; // SQLite connection
-import authMiddleware from "../middleware/auth.js"; // ✅ auth middleware
+import db from "./db.js"; // SQLite connection
+import authMiddleware from "./auth.js"; // ✅ auth middleware
 
 const router = express.Router();
 
@@ -359,3 +359,4 @@ router.get("/stream", (req, res) => {
 });
 
 export default router;
+
