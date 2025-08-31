@@ -9,7 +9,7 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new sqlite3.Database(path.join(__dirname, "../dripzoid.db"));
+const db = new sqlite3.Database(path.join(__dirname, "./dripzoid.db"));
 
 // Middleware: JWT authentication
 function authenticateToken(req, res, next) {
@@ -112,3 +112,4 @@ router.delete("/:id", authenticateToken, (req, res) => {
 });
 
 export default router;
+
