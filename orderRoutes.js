@@ -42,7 +42,7 @@ const allQuery = (sql, params = []) =>
  *  - Validates product existence and available stock
  *  - Starts transaction, inserts order + order_items, updates stock, deletes processed cart rows (only)
  */
-router.post("/place-order", authMiddleware, async (req, res) => {
+router.post("/place-order", auth, async (req, res) => {
   const { cartItems = [], items = [], buyNow = false, shippingAddress, paymentMethod, paymentDetails, totalAmount } = req.body;
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
@@ -260,7 +260,7 @@ router.post("/place-order", authMiddleware, async (req, res) => {
 /**
  * GET /orders/:id
  */
-router.get("/orders/:id", authMiddleware, async (req, res) => {
+router.get("/orders/:id", auth, async (req, res) => {
   const orderId = req.params.id;
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
@@ -290,7 +290,7 @@ router.get("/orders/:id", authMiddleware, async (req, res) => {
 /**
  * GET /
  */
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", auth, async (req, res) => {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
@@ -324,7 +324,7 @@ router.get("/", authMiddleware, async (req, res) => {
 });
 
 // backend/routes/orderRoutes.js - status endpoint
-router.get("/status", authMiddleware, (req, res) => {
+router.get("/status", auth, (req, res) => {
   const ids = req.query.ids?.split(",").map(id => parseInt(id, 10)).filter(Boolean);
 
   if (!ids || !ids.length) {
@@ -359,5 +359,6 @@ router.get("/stream", (req, res) => {
 });
 
 export default router;
+
 
 
