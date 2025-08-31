@@ -35,7 +35,7 @@ const allQuery = (sql, params = []) =>
 // =========================
 
 // 📌 Get all addresses for logged-in user
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", auth, async (req, res) => {
   try {
     const addresses = await allQuery(
       "SELECT * FROM addresses WHERE user_id = ? ORDER BY created_at DESC",
@@ -48,7 +48,7 @@ router.get("/", authMiddleware, async (req, res) => {
 });
 
 // 📌 Add new address
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", auth, async (req, res) => {
   try {
     const { label, line1, line2, city, state, pincode, country, phone, is_default } = req.body;
 
@@ -76,7 +76,7 @@ router.post("/", authMiddleware, async (req, res) => {
 });
 
 // 📌 Update address
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
     const { label, line1, line2, city, state, pincode, country, phone, is_default } = req.body;
@@ -105,7 +105,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 // 📌 Delete address
-router.delete("/:id", authMiddleware, async (req, res) => {
+router.delete("/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
     const result = await runQuery(
@@ -124,7 +124,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 });
 
 // 📌 Get default address
-router.get("/default", authMiddleware, async (req, res) => {
+router.get("/default", auth, async (req, res) => {
   try {
     const defaultAddress = await getQuery(
       "SELECT * FROM addresses WHERE user_id = ? AND is_default = 1",
@@ -137,5 +137,6 @@ router.get("/default", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
 
 
