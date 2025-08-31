@@ -290,7 +290,7 @@ app.use("/api/account", accountSettingsRoutes);
 
 
 // Admin Routes
-app.use("/api/admin/products", authAdmin, adminProductsRoutes);
+app.use("/api/admin/products", auth, adminProductsRoutes);
 app.use("/api/admin/orders", authAdmin, adminOrdersRoutes);
 app.use("/api/admin", authAdmin, adminStatsRoutes);
 
@@ -327,4 +327,5 @@ app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PO
 
 // Export app & db for tests or other scripts (optional)
 export { app, db };
+
 
