@@ -15,7 +15,7 @@ import wishlistRoutes from "./wishlist.js";
 import productsRouter from "./products.js";
 import cartRouter from "./cart.js";
 import adminProductsRoutes from "./adminProducts.js";
-import authAdmin from "./auth.js";
+import { auth } from "./auth.js";
 import adminStatsRoutes from "./adminStats.js";
 import orderRoutes from "./orderRoutes.js";
 import uploadRoutes from "./uploadRoutes.js";
@@ -327,3 +327,4 @@ app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PO
 
 // Export app & db for tests or other scripts (optional)
 export { app, db };
+
