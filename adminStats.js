@@ -1,7 +1,7 @@
 // backend/routes/adminStats.js
 import express from "express";
-import db from "../db.js";
-import authMiddleware from "../middleware/authAdmin.js";
+import db from "./db.js";
+import authMiddleware from "./authAdmin.js";
 
 const router = express.Router();
 
@@ -209,3 +209,4 @@ router.get("/stats", authMiddleware, (req, res) => {
 });
 
 export default router;
+
