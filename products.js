@@ -7,7 +7,7 @@ const router = express.Router();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbPath = path.join(__dirname, "..", "dripzoid.db");
+const dbPath = path.join(__dirname, "./dripzoid.db"); 
 
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) console.error("❌ Products router DB error:", err.message);
@@ -325,3 +325,4 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
+
