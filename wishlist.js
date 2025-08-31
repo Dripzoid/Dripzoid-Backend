@@ -1,7 +1,7 @@
 // routes/wishlist.js
 import express from "express";
-import db from "../db.js";
-import auth  from "../middleware/auth.js";
+import db from "./db.js";
+import auth  from "./auth.js";
 
 const router = express.Router();
 
@@ -132,3 +132,4 @@ router.delete("/:productId", auth, (req, res) => {
 
 
 export default router;
+
