@@ -2,7 +2,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import db from "../db.js";
+import db from "./db.js";
 
 const router = express.Router();
 
@@ -329,3 +329,4 @@ router.patch("/normalize", auth, async (req, res) => {
 });
 
 export default router;
+
