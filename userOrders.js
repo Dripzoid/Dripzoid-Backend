@@ -1,7 +1,7 @@
 // routes/userOrdersRoutes.js
 import express from "express";
-import db from "../db.js";
-import authMiddleware from "../middleware/auth.js";
+import db from "./db.js";
+import authMiddleware from "./auth.js";
 import PDFDocument from "pdfkit";
 
 const router = express.Router();
@@ -246,3 +246,4 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
