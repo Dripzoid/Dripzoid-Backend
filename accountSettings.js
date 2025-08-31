@@ -1,9 +1,9 @@
 // backend/routes/accountSettings.js
 import express from "express";
 import bcrypt from "bcryptjs";
-import db from "../db.js"; // db.js should export an sqlite3.Database instance
+import db from "./db.js"; // db.js should export an sqlite3.Database instance
 import { UAParser } from "ua-parser-js";
-import auth from "../middleware/auth.js"; // JWT verification middleware
+import auth from "./auth.js"; // JWT verification middleware
 
 const router = express.Router();
 
@@ -310,3 +310,4 @@ router.delete("/delete", auth, (req, res) => {
 });
 
 export default router;
+
