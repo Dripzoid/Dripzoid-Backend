@@ -1,6 +1,6 @@
 // routes/featuredRoutes.js
 import express from "express";
-import db from "../db.js"; // sqlite3 db instance
+import db from "./db.js"; // sqlite3 db instance
 
 const router = express.Router();
 
@@ -36,3 +36,4 @@ router.get("/products", (req, res) => {
 });
 
 export default router;
+
