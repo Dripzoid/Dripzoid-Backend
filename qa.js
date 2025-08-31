@@ -1,5 +1,5 @@
 import express from "express";
-import db from "../db.js";
+import db from "./db.js";
 
 const router = express.Router();
 
@@ -95,3 +95,4 @@ router.post("/:questionId/answer", (req, res) => {
 });
 
 export default router;
+
