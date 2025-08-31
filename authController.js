@@ -1,5 +1,5 @@
 const bcrypt = require("bcrypt");
-const { createUser, findUserByEmail } = require("../models/userModel");
+const { createUser, findUserByEmail } = require("./userModel");
 
 const register = async (req, res) => {
   try {
@@ -31,3 +31,4 @@ const register = async (req, res) => {
 };
 
 module.exports = { register };
+
