@@ -10,7 +10,7 @@ const router = express.Router();
  * GET /api/user/orders
  * Fetch all orders for logged-in user (supports pagination, filtering, sorting)
  */
-router.get("/", authMiddleware, (req, res) => {
+router.get("/", auth, (req, res) => {
   const userId = req.user.id;
   const page = parseInt(req.query.page, 10) || 1;
   const limit = parseInt(req.query.limit, 10) || 10;
@@ -63,7 +63,7 @@ router.get("/", authMiddleware, (req, res) => {
 /**
  * PUT /api/user/orders/:id/cancel
  */
-router.put("/:id/cancel", authMiddleware, (req, res) => {
+router.put("/:id/cancel", auth, (req, res) => {
   const userId = req.user.id;
   const orderId = req.params.id;
 
@@ -88,7 +88,7 @@ router.put("/:id/cancel", authMiddleware, (req, res) => {
 /**
  * POST /api/user/orders/:id/reorder
  */
-router.post("/:id/reorder", authMiddleware, async (req, res) => {
+router.post("/:id/reorder", auth, async (req, res) => {
   const userId = req.user.id;
   const orderId = req.params.id;
 
@@ -159,7 +159,7 @@ router.post("/:id/reorder", authMiddleware, async (req, res) => {
 /**
  * GET /api/user/orders/:id/invoice
  */
-router.get("/:id/invoice", authMiddleware, async (req, res) => {
+router.get("/:id/invoice", auth, async (req, res) => {
   const userId = req.user.id;
   const orderId = req.params.id;
 
@@ -246,5 +246,6 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
