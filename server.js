@@ -11,24 +11,25 @@ import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { v2 as cloudinary } from "cloudinary";
 
-import wishlistRoutes from "./routes/wishlist.js";
-import productsRouter from "./routes/products.js";
-import cartRouter from "./routes/cart.js";
-import adminProductsRoutes from "./routes/adminProducts.js";
-import authAdmin from "./middleware/auth.js";
-import adminStatsRoutes from "./routes/adminStats.js";
-import orderRoutes from "./routes/orderRoutes.js";
-import uploadRoutes from "./routes/uploadRoutes.js";
-import featuredRoutes from "./routes/featuredRoutes.js";
-import userOrdersRoutes from "./routes/userOrders.js";
-import addressRoutes from "./routes/address.js";
-import paymentsRouter from "./routes/payments.js";
-import accountSettingsRoutes from "./routes/accountSettings.js";
-import adminOrdersRoutes from "./routes/adminOrders.js";
-import reviewsRouter from "./routes/reviews.js";
-import qaRouter from "./routes/qa.js";
-import votesRouter from "./routes/votes.js"; // ✅ NEW
+import wishlistRoutes from "./wishlist.js";
+import productsRouter from "./products.js";
+import cartRouter from "./cart.js";
+import adminProductsRoutes from "./adminProducts.js";
+import authAdmin from "./auth.js";
+import adminStatsRoutes from "./adminStats.js";
+import orderRoutes from "./orderRoutes.js";
+import uploadRoutes from "./uploadRoutes.js";
+import featuredRoutes from "./featuredRoutes.js";
+import userOrdersRoutes from "./userOrders.js";
+import addressRoutes from "./address.js";
+import paymentsRouter from "./payments.js";
+import accountSettingsRoutes from "./accountSettings.js";
+import adminOrdersRoutes from "./adminOrders.js";
+import reviewsRouter from "./reviews.js";
+import qaRouter from "./qa.js";
+import votesRouter from "./votes.js"; // ✅ NEW
 import { UAParser } from "ua-parser-js";
+
 
 
 const __filename = fileURLToPath(import.meta.url);
