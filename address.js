@@ -1,7 +1,7 @@
 // routes/address.js
 import express from "express";
-import db from "../db.js"; // your SQLite connection
-import authMiddleware from "../middleware/auth.js";
+import db from "./db.js"; // your SQLite connection
+import authMiddleware from "./auth.js";
 
 const router = express.Router();
 
@@ -137,3 +137,4 @@ router.get("/default", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
