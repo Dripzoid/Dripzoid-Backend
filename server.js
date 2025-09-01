@@ -189,63 +189,78 @@ app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile",
 
 app.get(
   "/api/auth/google/callback",
-  passport.authenticate("google", { failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
+  passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   async (req, res) => {
-    try {
-      const email = req.user?.email;
-      const nameFromGoogle = (req.user?.name || "").trim();
+    const email = req.user?.email;
+    const nameFromGoogle = (req.user?.name || "").trim();
 
-      if (!email) return res.redirect(`${CLIENT_URL}/login?error=missing_email`);
+    if (!email) return res.status(400).json({ message: "Missing email from Google" });
 
-      // Wrap SQLite get in a promise
-      const getUser = () =>
-        new Promise((resolve, reject) => {
-          db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
-            if (err) return reject(err);
-            resolve(row);
-          });
-        });
+    db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
+      if (err) {
+        console.error("DB error:", err.message);
+        return res.status(500).json({ message: "Database error" });
+      }
 
-      let row = await getUser();
+      let userId, userName, isAdmin;
 
       if (!row) {
         const safeName = nameFromGoogle || email.split("@")[0];
         const randomPassword = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
-        // Wrap db.run in a promise
-        const insertUser = () =>
-          new Promise((resolve, reject) => {
+        try {
+          await new Promise((resolve, reject) => {
             db.run(
               "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
               [safeName, email, null, hashedPassword],
               function (err2) {
                 if (err2) return reject(err2);
-                resolve(this.lastID);
+                userId = this.lastID;
+                userName = safeName;
+                isAdmin = 0;
+                resolve();
               }
             );
           });
-
-        const userId = await insertUser();
-        return issueTokenAndRespond(res, req, userId, email, safeName, 0, true);
+        } catch (err2) {
+          console.error("Failed to create Google user:", err2.message);
+          return res.status(500).json({ message: "Signup failed" });
+        }
       } else {
-        return issueTokenAndRespond(
-          res,
-          req,
-          row.id,
-          row.email,
-          row.name || nameFromGoogle,
-          Number(row.is_admin) || 0,
-          true
-        );
+        userId = row.id;
+        userName = row.name || nameFromGoogle;
+        isAdmin = Number(row.is_admin) || 0;
       }
-    } catch (err) {
-      console.error("Google OAuth callback error:", err);
-      return res.redirect(`${CLIENT_URL}/login?error=signup_failed`);
-    }
+
+      // Issue JWT and save session
+      const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
+      const device = getDevice(req);
+      const ip = getIP(req);
+      const lastActive = new Date().toISOString();
+
+      db.run(
+        "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+        [userId, device, ip, lastActive],
+        function (err2) {
+          if (err2) {
+            console.error("Failed to insert session:", err2.message);
+            return res.status(500).json({ message: "Failed to create session" });
+          }
+          const sessionId = this.lastID;
+
+          // Send JSON response
+          return res.json({
+            message: "Success",
+            token,
+            sessionId,
+            user: { id: userId, name: userName, email, phone: null, is_admin: isAdmin },
+          });
+        }
+      );
+    });
   }
 );
-
 
 // ---------- REGISTER & LOGIN ----------
 app.post("/api/register", async (req, res) => {
@@ -361,5 +376,6 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
 
 
