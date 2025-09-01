@@ -189,13 +189,13 @@ app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile",
 app.get(
   "/api/auth/google/callback",
   passport.authenticate("google", { failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
-  (req, res) => {
+  async (req, res) => {
     const email = req.user?.email;
     const nameFromGoogle = (req.user?.name || "").trim();
 
     if (!email) return res.redirect(`${CLIENT_URL}/login?error=missing_email`);
 
-    db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
+    db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
       if (err) {
         console.error("DB error:", err.message);
         return res.redirect(`${CLIENT_URL}/login?error=db_error`);
@@ -203,9 +203,13 @@ app.get(
 
       if (!row) {
         const safeName = nameFromGoogle || email.split("@")[0];
+        // generate random password hash
+        const randomPassword = crypto.randomBytes(16).toString("hex");
+        const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
         db.run(
           "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
-          [safeName, email, null, null],
+          [safeName, email, null, hashedPassword],
           function (err2) {
             if (err2) {
               console.error("Failed to create Google user:", err2.message);
@@ -216,7 +220,15 @@ app.get(
           }
         );
       } else {
-        return issueTokenAndRespond(res, req, row.id, row.email, row.name || nameFromGoogle, Number(row.is_admin) || 0, true);
+        return issueTokenAndRespond(
+          res,
+          req,
+          row.id,
+          row.email,
+          row.name || nameFromGoogle,
+          Number(row.is_admin) || 0,
+          true
+        );
       }
     });
   }
@@ -336,3 +348,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
