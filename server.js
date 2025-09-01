@@ -10,9 +10,9 @@ import path from "path";
 import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { v2 as cloudinary } from "cloudinary";
-import session from "express-session";              // 🔹 GOOGLE OAUTH
-import passport from "passport";                   // 🔹 GOOGLE OAUTH
-import { Strategy as GoogleStrategy } from "passport-google-oauth20"; // 🔹 GOOGLE OAUTH
+import session from "express-session";
+import passport from "passport";
+import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { UAParser } from "ua-parser-js";
 
 import wishlistRoutes from "./wishlist.js";
@@ -36,24 +36,29 @@ import votesRouter from "./votes.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+const API_BASE = process.env.API_BASE || "http://localhost:5000";
+const JWT_SECRET = process.env.JWT_SECRET || "Dripzoid.App@2025";
+
 const app = express();
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
+
+// CORS: restrict to CLIENT_URL if provided (helps cookies & redirects)
+app.use(cors({ origin: process.env.CLIENT_URL || true, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || "Dripzoid.App@2025";
-
-// ✅ Cloudinary Configuration
+// Cloudinary (optional)
 if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET,
   });
+} else {
+  console.warn("⚠️ Cloudinary env vars not fully set. Uploads will fail until configured.");
 }
 
-// ✅ SQLite connection
+// SQLite DB
 const dbPath = path.join(__dirname, "dripzoid.db");
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) console.error("❌ SQLite connection error:", err.message);
@@ -61,21 +66,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
 });
 app.locals.db = db;
 
-// JWT Middleware
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Invalid or missing token" });
-  }
-  const token = authHeader.split(" ")[1];
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ message: "Invalid or expired token" });
-    req.user = user;
-    next();
-  });
-}
-
-// Helpers
+// ---------- Helpers ----------
 function getDevice(req) {
   const parser = new UAParser(req.headers["user-agent"]);
   const device = parser.getDevice().model || parser.getOS().name || "Unknown Device";
@@ -86,10 +77,21 @@ function getIP(req) {
   return req.headers["x-forwarded-for"]?.split(",")[0] || req.connection.remoteAddress || "Unknown IP";
 }
 
-// =================================================
-// 🔹 GOOGLE OAUTH SETUP
-// =================================================
-// --- Sessions (dev-safe defaults; adjust for prod as needed) ---
+// JWT middleware (used for API endpoints)
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader) return res.status(401).json({ message: "No token provided" });
+  if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ message: "Invalid token format" });
+
+  const token = authHeader.split(" ")[1];
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ message: "Invalid or expired token" });
+    req.user = user;
+    next();
+  });
+}
+
+// ---------- OAuth (Passport + Google) ----------
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "google-oauth-secret",
@@ -105,16 +107,14 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// --- Google OAuth Strategy ---
 passport.use(
   new GoogleStrategy(
     {
-      clientID: process.env.GOOGLE_CLIENT_ID,          // required
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,  // required
-      callbackURL: `${process.env.API_BASE || "http://localhost:5000"}/api/auth/google/callback`,
+      clientID: process.env.GOOGLE_CLIENT_ID || "",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+      callbackURL: `${API_BASE}/api/auth/google/callback`,
     },
     (accessToken, refreshToken, profile, done) => {
-      // Normalize Google profile
       const user = {
         googleId: profile.id,
         name: profile.displayName || "",
@@ -129,108 +129,105 @@ passport.use(
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
 
-// --- Google Auth Routes ---
-app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
-
-app.get(
-  "/api/auth/google/callback",
-  passport.authenticate("google", {
-    // On failure, send to frontend /login with an error code
-    failureRedirect: `${process.env.CLIENT_URL}/login?error=google_auth_failed`,
-  }),
-  (req, res) => {
-    // Safety: require email from Google
-    const email = req.user?.email;
-    const nameFromGoogle = (req.user?.name || "").trim();
-
-    if (!email) {
-      return res.redirect(`${process.env.CLIENT_URL}/login?error=missing_email`);
-    }
-
-    // Check if user exists
-    db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
-      if (err) {
-        return res.redirect(`${process.env.CLIENT_URL}/login?error=db_error`);
-      }
-
-      if (!row) {
-        // New Google user — insert minimal record
-        const safeName =
-          nameFromGoogle ||
-          (typeof email === "string" ? email.split("@")[0] : "User");
-
-        db.run(
-          "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
-          [safeName, email, null, null],
-          function (err2) {
-            if (err2) {
-              // Likely unique constraint or schema issue
-              return res.redirect(`${process.env.CLIENT_URL}/login?error=signup_failed`);
-            }
-            const userId = this.lastID;
-            issueTokenAndRedirect({
-              userId,
-              email,
-              name: safeName,
-              isAdmin: 0,
-              res,
-              req,
-            });
-          }
-        );
-      } else {
-        // Existing user
-        issueTokenAndRedirect({
-          userId: row.id,
-          email: row.email,
-          name: row.name || nameFromGoogle || "",
-          isAdmin: Number(row.is_admin) || 0,
-          res,
-          req,
-        });
-      }
-    });
-  }
-);
-
-// --- Helper: issue JWT + session, then redirect to /account with token & sessionId ---
-function issueTokenAndRedirect(res, req, userId, email, name) {
+// Unified helper: create session row and either JSON-respond (API) or redirect (OAuth)
+function issueTokenAndRespond(res, req, userId, email, name = "", isAdmin = 0, isOAuth = false) {
   try {
-    const token = jwt.sign({ id: userId, email, is_admin: 0 }, JWT_SECRET, { expiresIn: "180d" });
-
+    const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
     const device = getDevice(req);
     const ip = getIP(req);
     const lastActive = new Date().toISOString();
 
+    // NOTE: using function callback to access this.lastID
     db.run(
       "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
       [userId, device, ip, lastActive],
       function (err2) {
         if (err2) {
-          return res.redirect(`${process.env.CLIENT_URL}/login?error=session_create_failed`);
+          console.error("Failed to insert session:", err2.message);
+          if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=session_create_failed`);
+          return res.status(500).json({ message: "Failed to create session" });
         }
 
         const sessionId = this.lastID;
-        return res.redirect(
-          `${process.env.CLIENT_URL}/account?token=${token}&sessionId=${sessionId}&name=${encodeURIComponent(name)}`
-        );
+
+        if (isOAuth) {
+          const url = new URL("/account", CLIENT_URL);
+          const params = new URLSearchParams({ token, sessionId: String(sessionId) });
+          if (name) params.set("name", name);
+          url.search = params.toString();
+          return res.redirect(url.toString());
+        } else {
+          // API response format similar to your existing login/register responses
+          return res.json({
+            message: "Success",
+            token,
+            sessionId,
+            user: { id: userId, name, email, phone: null, is_admin: isAdmin },
+          });
+        }
       }
     );
   } catch (err) {
-    return res.redirect(`${process.env.CLIENT_URL}/login?error=token_issue_failed`);
+    console.error("Token issuance failed:", err);
+    if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=token_issue_failed`);
+    return res.status(500).json({ message: "Failed to issue token" });
   }
 }
 
+// ---------- Google OAuth routes ----------
+app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
+app.get(
+  "/api/auth/google/callback",
+  passport.authenticate("google", {
+    failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed`,
+  }),
+  (req, res) => {
+    const email = req.user?.email;
+    const nameFromGoogle = (req.user?.name || "").trim();
 
-// =================================================
-// 🔹 REGISTER & LOGIN (existing)
-// =================================================
+    if (!email) {
+      return res.redirect(`${CLIENT_URL}/login?error=missing_email`);
+    }
+
+    // Check if user exists
+    db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
+      if (err) {
+        console.error("DB error while checking Google user:", err.message);
+        return res.redirect(`${CLIENT_URL}/login?error=db_error`);
+      }
+
+      if (!row) {
+        // Create minimal user record for Google sign-in
+        const safeName = nameFromGoogle || (typeof email === "string" ? email.split("@")[0] : "User");
+        db.run(
+          "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
+          [safeName, email, null, null],
+          function (err2) {
+            if (err2) {
+              console.error("Failed to create user from Google:", err2.message);
+              return res.redirect(`${CLIENT_URL}/login?error=signup_failed`);
+            }
+            const userId = this.lastID;
+            return issueTokenAndRespond(res, req, userId, email, safeName, 0, true);
+          }
+        );
+      } else {
+        // existing user
+        return issueTokenAndRespond(res, req, row.id, row.email, row.name || nameFromGoogle || "", Number(row.is_admin) || 0, true);
+      }
+    });
+  }
+);
+
+// ---------- REGISTER & LOGIN (API) ----------
+
 app.post("/api/register", async (req, res) => {
   const { name, email, phone, password } = req.body;
   if (!name || !email || !phone || !password) {
     return res.status(400).json({ message: "All fields are required" });
   }
+
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
     db.run(
@@ -241,33 +238,102 @@ app.post("/api/register", async (req, res) => {
           if (err.message.includes("UNIQUE constraint failed")) {
             return res.status(400).json({ message: "Email already exists" });
           }
+          console.error("Register insert error:", err.message);
           return res.status(500).json({ message: err.message });
         }
+
         const userId = this.lastID;
-        issueTokenAndRedirect(userId, email, name, res, req);
+        // Use helper to insert session and return token + sessionId JSON
+        return issueTokenAndRespond(res, req, userId, email, name, 0, false);
       }
     );
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("Register error:", error);
+    return res.status(500).json({ message: error.message });
   }
 });
 
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
+
   db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
-    if (err) return res.status(500).json({ message: err.message });
+    if (err) {
+      console.error("Login DB error:", err.message);
+      return res.status(500).json({ message: err.message });
+    }
     if (!row) return res.status(401).json({ message: "User not found" });
 
     const isMatch = await bcrypt.compare(password, row.password);
     if (!isMatch) return res.status(401).json({ message: "Invalid password" });
 
-    issueTokenAndRedirect(row.id, row.email, row.name, res, req);
+    return issueTokenAndRespond(res, req, row.id, row.email, row.name, row.is_admin, false);
   });
 });
 
-// =================================================
-// ✅ Other routes (wishlist, products, etc.)
-// =================================================
+// ---------- Get User Profile (protected) ----------
+app.get("/api/users/:id", authenticateToken, (req, res) => {
+  const requestedId = Number(req.params.id);
+  const tokenUserId = Number(req.user.id);
+
+  if (requestedId !== tokenUserId) {
+    return res.status(403).json({ message: "Access denied" });
+  }
+
+  db.get(
+    "SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?",
+    [requestedId],
+    (err, row) => {
+      if (err) {
+        console.error("Get profile DB error:", err.message);
+        return res.status(500).json({ message: err.message });
+      }
+      if (!row) return res.status(404).json({ message: "User not found" });
+
+      res.json(row);
+    }
+  );
+});
+
+// ---------- Update User Profile (protected) ----------
+app.put("/api/users/:id", authenticateToken, (req, res) => {
+  const requestedId = Number(req.params.id);
+  const tokenUserId = Number(req.user.id);
+
+  if (requestedId !== tokenUserId) {
+    return res.status(403).json({ message: "Access denied" });
+  }
+
+  const { name, email, phone } = req.body;
+  if (!name || !email || !phone) {
+    return res.status(400).json({ message: "All fields are required" });
+  }
+
+  const sql = `UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?`;
+
+  db.run(sql, [name, email, phone, requestedId], function (err) {
+    if (err) {
+      console.error("Update profile DB error:", err.message);
+      return res.status(500).json({ message: err.message });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    db.get(
+      "SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?",
+      [requestedId],
+      (err, row) => {
+        if (err) {
+          console.error("Get updated profile DB error:", err.message);
+          return res.status(500).json({ message: err.message });
+        }
+        res.json(row);
+      }
+    );
+  });
+});
+
+// ---------- Mount other feature routes ----------
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/products", productsRouter);
 app.use("/api/cart", cartRouter);
@@ -277,17 +343,40 @@ app.use("/api/user/orders", authenticateToken, userOrdersRoutes);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/account", accountSettingsRoutes);
+
+// Admin routes with auth middleware (keeps existing import name)
 app.use("/api/admin/products", auth, adminProductsRoutes);
 app.use("/api/admin/orders", auth, adminOrdersRoutes);
 app.use("/api/admin", auth, adminStatsRoutes);
+
 app.use("/api/reviews", reviewsRouter);
 app.use("/api/qa", qaRouter);
 app.use("/api/votes", votesRouter);
 
-// ✅ Start server
+// Health check
+app.get("/test-env", (req, res) => {
+  res.json({
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || null,
+    apiKey: !!process.env.CLOUDINARY_API_KEY,
+    apiSecret: !!process.env.CLOUDINARY_API_SECRET,
+    nodeEnv: process.env.NODE_ENV || "development",
+  });
+});
+
+// 404 handler for /api/*
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) return res.status(404).json({ message: "API route not found" });
+  next();
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  res.status(err.status || 500).json({ message: err.message || "Internal server error" });
+});
+
+// Start server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
 
 export { app, db };
-
-
