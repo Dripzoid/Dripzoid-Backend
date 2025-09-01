@@ -240,13 +240,15 @@ app.get(
 
             const sessionId = this.lastID;
 
-            // Send JSON for popup
-            res.json({
-              message: "Success",
+            // 🔹 Redirect to SPA /account with query params
+            const redirectUrl = new URL("/account", CLIENT_URL);
+            redirectUrl.search = new URLSearchParams({
               token,
-              sessionId,
-              user: { id: userId, name: userName, email, phone: null, is_admin: isAdmin },
-            });
+              sessionId: String(sessionId),
+              name: userName
+            }).toString();
+
+            return res.redirect(redirectUrl.toString());
           }
         );
       });
@@ -372,6 +374,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
 
 
 
