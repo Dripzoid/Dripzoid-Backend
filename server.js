@@ -191,25 +191,22 @@ app.get(
   "/api/auth/google/callback",
   passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   async (req, res) => {
-    const email = req.user?.email;
-    const nameFromGoogle = (req.user?.name || "").trim();
+    try {
+      const email = req.user?.email;
+      const nameFromGoogle = (req.user?.name || "").trim();
+      if (!email) return res.status(400).json({ message: "Missing email from Google" });
 
-    if (!email) return res.status(400).json({ message: "Missing email from Google" });
+      // Check if user exists
+      db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
+        if (err) return res.status(500).json({ message: "Database error" });
 
-    db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
-      if (err) {
-        console.error("DB error:", err.message);
-        return res.status(500).json({ message: "Database error" });
-      }
+        let userId, userName, isAdmin;
 
-      let userId, userName, isAdmin;
+        if (!row) {
+          const safeName = nameFromGoogle || email.split("@")[0];
+          const randomPassword = crypto.randomBytes(16).toString("hex");
+          const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
-      if (!row) {
-        const safeName = nameFromGoogle || email.split("@")[0];
-        const randomPassword = crypto.randomBytes(16).toString("hex");
-        const hashedPassword = await bcrypt.hash(randomPassword, 10);
-
-        try {
           await new Promise((resolve, reject) => {
             db.run(
               "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
@@ -223,44 +220,43 @@ app.get(
               }
             );
           });
-        } catch (err2) {
-          console.error("Failed to create Google user:", err2.message);
-          return res.status(500).json({ message: "Signup failed" });
+        } else {
+          userId = row.id;
+          userName = row.name || nameFromGoogle;
+          isAdmin = Number(row.is_admin) || 0;
         }
-      } else {
-        userId = row.id;
-        userName = row.name || nameFromGoogle;
-        isAdmin = Number(row.is_admin) || 0;
-      }
 
-      // Issue JWT and save session
-      const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
-      const device = getDevice(req);
-      const ip = getIP(req);
-      const lastActive = new Date().toISOString();
+        // Issue JWT and save session
+        const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
+        const device = getDevice(req);
+        const ip = getIP(req);
+        const lastActive = new Date().toISOString();
 
-      db.run(
-        "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-        [userId, device, ip, lastActive],
-        function (err2) {
-          if (err2) {
-            console.error("Failed to insert session:", err2.message);
-            return res.status(500).json({ message: "Failed to create session" });
+        db.run(
+          "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+          [userId, device, ip, lastActive],
+          function (err2) {
+            if (err2) return res.status(500).json({ message: "Failed to create session" });
+
+            const sessionId = this.lastID;
+
+            // Send JSON for popup
+            res.json({
+              message: "Success",
+              token,
+              sessionId,
+              user: { id: userId, name: userName, email, phone: null, is_admin: isAdmin },
+            });
           }
-          const sessionId = this.lastID;
-
-          // Send JSON response
-          return res.json({
-            message: "Success",
-            token,
-            sessionId,
-            user: { id: userId, name: userName, email, phone: null, is_admin: isAdmin },
-          });
-        }
-      );
-    });
+        );
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "OAuth login failed" });
+    }
   }
 );
+
 
 // ---------- REGISTER & LOGIN ----------
 app.post("/api/register", async (req, res) => {
@@ -376,6 +372,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
 
 
 
