@@ -89,30 +89,37 @@ function getIP(req) {
 // =================================================
 // 🔹 GOOGLE OAUTH SETUP
 // =================================================
+// --- Sessions (dev-safe defaults; adjust for prod as needed) ---
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "google-oauth-secret",
     resave: false,
     saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+    },
   })
 );
 app.use(passport.initialize());
 app.use(passport.session());
 
+// --- Google OAuth Strategy ---
 passport.use(
   new GoogleStrategy(
     {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${process.env.API_BASE}/api/auth/google/callback`,
+      clientID: process.env.GOOGLE_CLIENT_ID,          // required
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,  // required
+      callbackURL: `${process.env.API_BASE || "http://localhost:5000"}/api/auth/google/callback`,
     },
     (accessToken, refreshToken, profile, done) => {
       // Normalize Google profile
       const user = {
         googleId: profile.id,
-        name: profile.displayName,
-        email: profile.emails?.[0]?.value,
-        avatar: profile.photos?.[0]?.value,
+        name: profile.displayName || "",
+        email: profile.emails?.[0]?.value || null,
+        avatar: profile.photos?.[0]?.value || null,
       };
       return done(null, user);
     }
@@ -122,58 +129,110 @@ passport.use(
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
 
-// 🔹 Google Auth Routes
+// --- Google Auth Routes ---
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
 app.get(
   "/api/auth/google/callback",
-  passport.authenticate("google", { failureRedirect: "/login" }),
+  passport.authenticate("google", {
+    // On failure, send to frontend /login with an error code
+    failureRedirect: `${process.env.CLIENT_URL}/login?error=google_auth_failed`,
+  }),
   (req, res) => {
-    const { email, name } = req.user;
+    // Safety: require email from Google
+    const email = req.user?.email;
+    const nameFromGoogle = (req.user?.name || "").trim();
 
-    // Check if user exists in DB
+    if (!email) {
+      return res.redirect(`${process.env.CLIENT_URL}/login?error=missing_email`);
+    }
+
+    // Check if user exists
     db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
-      if (err) return res.redirect(`${process.env.CLIENT_URL}/auth-error`);
+      if (err) {
+        return res.redirect(`${process.env.CLIENT_URL}/login?error=db_error`);
+      }
 
       if (!row) {
-        // Register new Google user
+        // New Google user — insert minimal record
+        const safeName =
+          nameFromGoogle ||
+          (typeof email === "string" ? email.split("@")[0] : "User");
+
         db.run(
           "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
-          [name, email, null, null],
+          [safeName, email, null, null],
           function (err2) {
-            if (err2) return res.redirect(`${process.env.CLIENT_URL}/auth-error`);
-
+            if (err2) {
+              // Likely unique constraint or schema issue
+              return res.redirect(`${process.env.CLIENT_URL}/login?error=signup_failed`);
+            }
             const userId = this.lastID;
-            issueTokenAndRedirect(userId, email, name, res, req);
+            issueTokenAndRedirect({
+              userId,
+              email,
+              name: safeName,
+              isAdmin: 0,
+              res,
+              req,
+            });
           }
         );
       } else {
         // Existing user
-        issueTokenAndRedirect(row.id, row.email, row.name, res, req);
+        issueTokenAndRedirect({
+          userId: row.id,
+          email: row.email,
+          name: row.name || nameFromGoogle || "",
+          isAdmin: Number(row.is_admin) || 0,
+          res,
+          req,
+        });
       }
     });
   }
 );
 
-// Helper to issue JWT + session, then redirect frontend
-function issueTokenAndRedirect(userId, email, name, res, req) {
-  const token = jwt.sign({ id: userId, email, is_admin: 0 }, JWT_SECRET, { expiresIn: "180d" });
+// --- Helper: issue JWT + session, then redirect to /account with token & sessionId ---
+function issueTokenAndRedirect({ userId, email, name, isAdmin, res, req }) {
+  try {
+    const token = jwt.sign(
+      { id: userId, email, is_admin: isAdmin },
+      JWT_SECRET,
+      { expiresIn: "180d" }
+    );
 
-  const device = getDevice(req);
-  const ip = getIP(req);
-  const lastActive = new Date().toISOString();
+    const device = getDevice(req);
+    const ip = getIP(req);
+    const lastActive = new Date().toISOString();
 
-  db.run(
-    "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-    [userId, device, ip, lastActive],
-    function (err2) {
-      if (err2) return res.redirect(`${process.env.CLIENT_URL}/auth-error`);
+    db.run(
+      "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+      [userId, device, ip, lastActive],
+      function (err2) {
+        if (err2) {
+          return res.redirect(`${process.env.CLIENT_URL}/login?error=session_create_failed`);
+        }
 
-      const sessionId = this.lastID;
-      res.redirect(`${process.env.CLIENT_URL}/account?token=${token}&sessionId=${sessionId}&name=${encodeURIComponent(name)}`);
-    }
-  );
+        const sessionId = this.lastID;
+
+        // Build safe URL: CLIENT_URL/account?token=...&sessionId=...&name=...
+        const url = new URL("/account", process.env.CLIENT_URL);
+        const params = new URLSearchParams({
+          token,
+          sessionId: String(sessionId),
+        });
+        if (name) params.set("name", name);
+        url.search = params.toString();
+
+        return res.redirect(url.toString());
+      }
+    );
+  } catch (e) {
+    return res.redirect(`${process.env.CLIENT_URL}/login?error=token_issue_failed`);
+  }
 }
+
 
 // =================================================
 // 🔹 REGISTER & LOGIN (existing)
@@ -241,3 +300,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
 
 export { app, db };
+
