@@ -194,13 +194,9 @@ app.get(
 );
 
 // --- Helper: issue JWT + session, then redirect to /account with token & sessionId ---
-function issueTokenAndRedirect({ userId, email, name, isAdmin, res, req }) {
+function issueTokenAndRedirect(res, req, userId, email, name) {
   try {
-    const token = jwt.sign(
-      { id: userId, email, is_admin: isAdmin },
-      JWT_SECRET,
-      { expiresIn: "180d" }
-    );
+    const token = jwt.sign({ id: userId, email, is_admin: 0 }, JWT_SECRET, { expiresIn: "180d" });
 
     const device = getDevice(req);
     const ip = getIP(req);
@@ -215,23 +211,16 @@ function issueTokenAndRedirect({ userId, email, name, isAdmin, res, req }) {
         }
 
         const sessionId = this.lastID;
-
-        // Build safe URL: CLIENT_URL/account?token=...&sessionId=...&name=...
-        const url = new URL("/account", process.env.CLIENT_URL);
-        const params = new URLSearchParams({
-          token,
-          sessionId: String(sessionId),
-        });
-        if (name) params.set("name", name);
-        url.search = params.toString();
-
-        return res.redirect(url.toString());
+        return res.redirect(
+          `${process.env.CLIENT_URL}/account?token=${token}&sessionId=${sessionId}&name=${encodeURIComponent(name)}`
+        );
       }
     );
-  } catch (e) {
+  } catch (err) {
     return res.redirect(`${process.env.CLIENT_URL}/login?error=token_issue_failed`);
   }
 }
+
 
 
 // =================================================
@@ -300,4 +289,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
 
 export { app, db };
+
 
