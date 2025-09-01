@@ -5,6 +5,7 @@ dotenv.config();
 import express from "express";
 import sqlite3 from "sqlite3";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
 import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -190,35 +191,43 @@ app.get(
   "/api/auth/google/callback",
   passport.authenticate("google", { failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   async (req, res) => {
-    const email = req.user?.email;
-    const nameFromGoogle = (req.user?.name || "").trim();
+    try {
+      const email = req.user?.email;
+      const nameFromGoogle = (req.user?.name || "").trim();
 
-    if (!email) return res.redirect(`${CLIENT_URL}/login?error=missing_email`);
+      if (!email) return res.redirect(`${CLIENT_URL}/login?error=missing_email`);
 
-    db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
-      if (err) {
-        console.error("DB error:", err.message);
-        return res.redirect(`${CLIENT_URL}/login?error=db_error`);
-      }
+      // Wrap SQLite get in a promise
+      const getUser = () =>
+        new Promise((resolve, reject) => {
+          db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
+            if (err) return reject(err);
+            resolve(row);
+          });
+        });
+
+      let row = await getUser();
 
       if (!row) {
         const safeName = nameFromGoogle || email.split("@")[0];
-        // generate random password hash
         const randomPassword = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
-        db.run(
-          "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
-          [safeName, email, null, hashedPassword],
-          function (err2) {
-            if (err2) {
-              console.error("Failed to create Google user:", err2.message);
-              return res.redirect(`${CLIENT_URL}/login?error=signup_failed`);
-            }
-            const userId = this.lastID;
-            return issueTokenAndRespond(res, req, userId, email, safeName, 0, true);
-          }
-        );
+        // Wrap db.run in a promise
+        const insertUser = () =>
+          new Promise((resolve, reject) => {
+            db.run(
+              "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
+              [safeName, email, null, hashedPassword],
+              function (err2) {
+                if (err2) return reject(err2);
+                resolve(this.lastID);
+              }
+            );
+          });
+
+        const userId = await insertUser();
+        return issueTokenAndRespond(res, req, userId, email, safeName, 0, true);
       } else {
         return issueTokenAndRespond(
           res,
@@ -230,9 +239,13 @@ app.get(
           true
         );
       }
-    });
+    } catch (err) {
+      console.error("Google OAuth callback error:", err);
+      return res.redirect(`${CLIENT_URL}/login?error=signup_failed`);
+    }
   }
 );
+
 
 // ---------- REGISTER & LOGIN ----------
 app.post("/api/register", async (req, res) => {
@@ -348,4 +361,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
 
