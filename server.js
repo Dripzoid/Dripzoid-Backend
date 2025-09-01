@@ -42,20 +42,30 @@ const JWT_SECRET = process.env.JWT_SECRET || "Dripzoid.App@2025";
 
 const app = express();
 
-// CORS: restrict to CLIENT_URL if provided (helps cookies & redirects)
-app.use(cors({ origin: process.env.CLIENT_URL || true, credentials: true }));
+// CORS
+app.use(
+  cors({
+    origin: CLIENT_URL,
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Cloudinary (optional)
-if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+// Cloudinary
+if (
+  process.env.CLOUDINARY_CLOUD_NAME &&
+  process.env.CLOUDINARY_API_KEY &&
+  process.env.CLOUDINARY_API_SECRET
+) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET,
   });
 } else {
-  console.warn("⚠️ Cloudinary env vars not fully set. Uploads will fail until configured.");
+  console.warn("⚠️ Cloudinary env vars not fully set.");
 }
 
 // SQLite DB
@@ -77,7 +87,7 @@ function getIP(req) {
   return req.headers["x-forwarded-for"]?.split(",")[0] || req.connection.remoteAddress || "Unknown IP";
 }
 
-// JWT middleware (used for API endpoints)
+// JWT middleware
 function authenticateToken(req, res, next) {
   const authHeader = req.headers["authorization"];
   if (!authHeader) return res.status(401).json({ message: "No token provided" });
@@ -91,7 +101,7 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// ---------- OAuth (Passport + Google) ----------
+// ---------- OAuth ----------
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "google-oauth-secret",
@@ -99,11 +109,12 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      sameSite: "lax",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       secure: process.env.NODE_ENV === "production",
     },
   })
 );
+
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -113,8 +124,9 @@ passport.use(
       clientID: process.env.GOOGLE_CLIENT_ID || "",
       clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
       callbackURL: `${API_BASE}/api/auth/google/callback`,
+      passReqToCallback: true,
     },
-    (accessToken, refreshToken, profile, done) => {
+    (req, accessToken, refreshToken, profile, done) => {
       const user = {
         googleId: profile.id,
         name: profile.displayName || "",
@@ -129,7 +141,6 @@ passport.use(
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
 
-// Unified helper: create session row and either JSON-respond (API) or redirect (OAuth)
 function issueTokenAndRespond(res, req, userId, email, name = "", isAdmin = 0, isOAuth = false) {
   try {
     const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
@@ -137,7 +148,6 @@ function issueTokenAndRespond(res, req, userId, email, name = "", isAdmin = 0, i
     const ip = getIP(req);
     const lastActive = new Date().toISOString();
 
-    // NOTE: using function callback to access this.lastID
     db.run(
       "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
       [userId, device, ip, lastActive],
@@ -157,7 +167,6 @@ function issueTokenAndRespond(res, req, userId, email, name = "", isAdmin = 0, i
           url.search = params.toString();
           return res.redirect(url.toString());
         } else {
-          // API response format similar to your existing login/register responses
           return res.json({
             message: "Success",
             token,
@@ -179,33 +188,27 @@ app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile",
 
 app.get(
   "/api/auth/google/callback",
-  passport.authenticate("google", {
-    failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed`,
-  }),
+  passport.authenticate("google", { failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   (req, res) => {
     const email = req.user?.email;
     const nameFromGoogle = (req.user?.name || "").trim();
 
-    if (!email) {
-      return res.redirect(`${CLIENT_URL}/login?error=missing_email`);
-    }
+    if (!email) return res.redirect(`${CLIENT_URL}/login?error=missing_email`);
 
-    // Check if user exists
     db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
       if (err) {
-        console.error("DB error while checking Google user:", err.message);
+        console.error("DB error:", err.message);
         return res.redirect(`${CLIENT_URL}/login?error=db_error`);
       }
 
       if (!row) {
-        // Create minimal user record for Google sign-in
-        const safeName = nameFromGoogle || (typeof email === "string" ? email.split("@")[0] : "User");
+        const safeName = nameFromGoogle || email.split("@")[0];
         db.run(
           "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
           [safeName, email, null, null],
           function (err2) {
             if (err2) {
-              console.error("Failed to create user from Google:", err2.message);
+              console.error("Failed to create Google user:", err2.message);
               return res.redirect(`${CLIENT_URL}/login?error=signup_failed`);
             }
             const userId = this.lastID;
@@ -213,20 +216,16 @@ app.get(
           }
         );
       } else {
-        // existing user
-        return issueTokenAndRespond(res, req, row.id, row.email, row.name || nameFromGoogle || "", Number(row.is_admin) || 0, true);
+        return issueTokenAndRespond(res, req, row.id, row.email, row.name || nameFromGoogle, Number(row.is_admin) || 0, true);
       }
     });
   }
 );
 
-// ---------- REGISTER & LOGIN (API) ----------
-
+// ---------- REGISTER & LOGIN ----------
 app.post("/api/register", async (req, res) => {
   const { name, email, phone, password } = req.body;
-  if (!name || !email || !phone || !password) {
-    return res.status(400).json({ message: "All fields are required" });
-  }
+  if (!name || !email || !phone || !password) return res.status(400).json({ message: "All fields are required" });
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -235,16 +234,11 @@ app.post("/api/register", async (req, res) => {
       [name, email, phone, hashedPassword],
       function (err) {
         if (err) {
-          if (err.message.includes("UNIQUE constraint failed")) {
-            return res.status(400).json({ message: "Email already exists" });
-          }
+          if (err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
           console.error("Register insert error:", err.message);
           return res.status(500).json({ message: err.message });
         }
-
-        const userId = this.lastID;
-        // Use helper to insert session and return token + sessionId JSON
-        return issueTokenAndRespond(res, req, userId, email, name, 0, false);
+        return issueTokenAndRespond(res, req, this.lastID, email, name, 0, false);
       }
     );
   } catch (error) {
@@ -255,12 +249,8 @@ app.post("/api/register", async (req, res) => {
 
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
-
   db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
-    if (err) {
-      console.error("Login DB error:", err.message);
-      return res.status(500).json({ message: err.message });
-    }
+    if (err) return res.status(500).json({ message: err.message });
     if (!row) return res.status(401).json({ message: "User not found" });
 
     const isMatch = await bcrypt.compare(password, row.password);
@@ -270,66 +260,34 @@ app.post("/api/login", (req, res) => {
   });
 });
 
-// ---------- Get User Profile (protected) ----------
+// ---------- Get User Profile ----------
 app.get("/api/users/:id", authenticateToken, (req, res) => {
   const requestedId = Number(req.params.id);
-  const tokenUserId = Number(req.user.id);
+  if (requestedId !== Number(req.user.id)) return res.status(403).json({ message: "Access denied" });
 
-  if (requestedId !== tokenUserId) {
-    return res.status(403).json({ message: "Access denied" });
-  }
-
-  db.get(
-    "SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?",
-    [requestedId],
-    (err, row) => {
-      if (err) {
-        console.error("Get profile DB error:", err.message);
-        return res.status(500).json({ message: err.message });
-      }
-      if (!row) return res.status(404).json({ message: "User not found" });
-
-      res.json(row);
-    }
-  );
+  db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [requestedId], (err, row) => {
+    if (err) return res.status(500).json({ message: err.message });
+    if (!row) return res.status(404).json({ message: "User not found" });
+    res.json(row);
+  });
 });
 
-// ---------- Update User Profile (protected) ----------
+// ---------- Update User Profile ----------
 app.put("/api/users/:id", authenticateToken, (req, res) => {
   const requestedId = Number(req.params.id);
-  const tokenUserId = Number(req.user.id);
-
-  if (requestedId !== tokenUserId) {
-    return res.status(403).json({ message: "Access denied" });
-  }
+  if (requestedId !== Number(req.user.id)) return res.status(403).json({ message: "Access denied" });
 
   const { name, email, phone } = req.body;
-  if (!name || !email || !phone) {
-    return res.status(400).json({ message: "All fields are required" });
-  }
+  if (!name || !email || !phone) return res.status(400).json({ message: "All fields are required" });
 
-  const sql = `UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?`;
+  db.run("UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?", [name, email, phone, requestedId], function (err) {
+    if (err) return res.status(500).json({ message: err.message });
+    if (this.changes === 0) return res.status(404).json({ message: "User not found" });
 
-  db.run(sql, [name, email, phone, requestedId], function (err) {
-    if (err) {
-      console.error("Update profile DB error:", err.message);
-      return res.status(500).json({ message: err.message });
-    }
-    if (this.changes === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    db.get(
-      "SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?",
-      [requestedId],
-      (err, row) => {
-        if (err) {
-          console.error("Get updated profile DB error:", err.message);
-          return res.status(500).json({ message: err.message });
-        }
-        res.json(row);
-      }
-    );
+    db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [requestedId], (err2, row) => {
+      if (err2) return res.status(500).json({ message: err2.message });
+      res.json(row);
+    });
   });
 });
 
@@ -344,7 +302,6 @@ app.use("/api/addresses", addressRoutes);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/account", accountSettingsRoutes);
 
-// Admin routes with auth middleware (keeps existing import name)
 app.use("/api/admin/products", auth, adminProductsRoutes);
 app.use("/api/admin/orders", auth, adminOrdersRoutes);
 app.use("/api/admin", auth, adminStatsRoutes);
@@ -363,7 +320,7 @@ app.get("/test-env", (req, res) => {
   });
 });
 
-// 404 handler for /api/*
+// 404 handler
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ message: "API route not found" });
   next();
@@ -375,8 +332,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ message: err.message || "Internal server error" });
 });
 
-// Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
