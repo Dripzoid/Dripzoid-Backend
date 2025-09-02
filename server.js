@@ -37,39 +37,25 @@ import votesRouter from "./votes.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000"; // front-end URL
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 const API_BASE = process.env.API_BASE || "http://localhost:5000";
 const JWT_SECRET = process.env.JWT_SECRET || "Dripzoid.App@2025";
 
-// If true, server will append token+sessionId to the redirect URL after OAuth.
-// WARNING: this is less secure (token will be in URL). Keep as false in production.
-const OAUTH_REDIRECT_WITH_TOKEN = process.env.OAUTH_REDIRECT_WITH_TOKEN === "1" || process.env.OAUTH_REDIRECT_WITH_TOKEN === "true";
-
 const app = express();
 
-// If running behind a proxy (render/Heroku/Nginx), enable trust proxy.
+// Trust proxy if behind load balancer
 if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
   app.set("trust proxy", 1);
 }
 
-// CORS (allow credentials for cookie-based auth)
-app.use(
-  cors({
-    origin: CLIENT_URL,
-    credentials: true,
-  })
-);
-
+// CORS
+app.use(cors({ origin: CLIENT_URL, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Cloudinary
-if (
-  process.env.CLOUDINARY_CLOUD_NAME &&
-  process.env.CLOUDINARY_API_KEY &&
-  process.env.CLOUDINARY_API_SECRET
-) {
+// Cloudinary config
+if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
@@ -87,8 +73,19 @@ const db = new sqlite3.Database(dbPath, (err) => {
 });
 app.locals.db = db;
 
-// Ensure required tables exist (safe, idempotent)
+// Create tables if missing
 db.serialize(() => {
+  db.run(
+    `CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      email TEXT NOT NULL UNIQUE,
+      phone TEXT,
+      password TEXT NOT NULL,
+      is_admin INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )`
+  );
   db.run(
     `CREATE TABLE IF NOT EXISTS user_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,61 +99,52 @@ db.serialize(() => {
     `CREATE TABLE IF NOT EXISTS user_activity (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
-      session_id INTEGER,
       type TEXT,
       device TEXT,
       ip TEXT,
-      created_at TEXT
+      created_at TEXT DEFAULT (datetime('now', 'localtime')),
+      FOREIGN KEY(user_id) REFERENCES users(id)
     )`
   );
 });
 
-// ---------- Helpers ----------
+// ----------- Helpers -----------
 function getDevice(req) {
   try {
     const parser = new UAParser(req.headers["user-agent"]);
     const device = parser.getDevice().model || parser.getOS().name || "Unknown Device";
     const browser = parser.getBrowser().name || "";
     return `${device} ${browser}`.trim();
-  } catch (e) {
+  } catch {
     return "Unknown Device";
   }
 }
+
 function getIP(req) {
   const xf = req.headers["x-forwarded-for"];
   if (xf) return xf.split(",")[0].trim();
   return req.ip || req.socket?.remoteAddress || "Unknown IP";
 }
 
-// Cookie options for auth cookies
 const AUTH_COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
   secure: process.env.NODE_ENV === "production",
   path: "/",
-  // maxAge set dynamically during issuance
 };
 
-// JWT middleware — supports Authorization header or httpOnly cookie
+// JWT middleware
 function authenticateToken(req, res, next) {
   try {
     let token = null;
     const authHeader = req.headers["authorization"];
-    if (authHeader && authHeader.startsWith("Bearer ")) token = authHeader.split(" ")[1];
-
-    if (!token && req.cookies && req.cookies.token) token = req.cookies.token;
-
+    if (authHeader?.startsWith("Bearer ")) token = authHeader.split(" ")[1];
+    if (!token && req.cookies?.token) token = req.cookies.token;
     if (!token) return res.status(401).json({ message: "No token provided" });
 
     jwt.verify(token, JWT_SECRET, (err, payload) => {
       if (err) return res.status(403).json({ message: "Invalid or expired token" });
       req.user = payload;
-      req.token = token;
-
-      // if sessionId cookie present, attach to req for convenience
-      if (req.cookies && req.cookies.sessionId) {
-        req.sessionId = req.cookies.sessionId;
-      }
       next();
     });
   } catch (err) {
@@ -165,9 +153,8 @@ function authenticateToken(req, res, next) {
   }
 }
 
-// ---------- Passport (Google OAuth) ----------
+// ----------- Passport (Google OAuth) -----------
 app.use(passport.initialize());
-// we do NOT use passport.session() here (avoid in-memory store)
 
 passport.use(
   new GoogleStrategy(
@@ -189,263 +176,129 @@ passport.use(
   )
 );
 
-// ---------- Utility: issue token, create session, set cookies or return JSON ----------
-// activityType: 'login' | 'register' | 'logout'
+// ----------- Utility: Issue token & activity ----------
 function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
-  try {
-    // Normalize id/email
-    const normalizedEmail = typeof email === "string" ? email.toLowerCase() : email;
-
-    const token = jwt.sign({ id: userId, email: normalizedEmail, is_admin: isAdmin }, JWT_SECRET, {
-      expiresIn: "180d",
-    });
-
-    const device = getDevice(req);
-    const ip = getIP(req);
-    const lastActive = new Date().toISOString();
-
-    // Insert session
-    db.run(
-      "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-      [userId, device, ip, lastActive],
-      function (err2) {
-        if (err2) {
-          console.error("Failed to insert session:", err2.message);
-          if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=session_create_failed`);
-          return res.status(500).json({ message: "Failed to create session" });
-        }
-
-        const sessionId = this.lastID;
-        const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180; // 180 days
-        const activityCreatedAt = new Date().toISOString();
-
-        // Insert activity (best-effort)
-        db.run(
-          "INSERT INTO user_activity (user_id, session_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-          [userId, sessionId, activityType, device, ip, activityCreatedAt],
-          function (actErr) {
-            if (actErr) {
-              console.warn("Failed to insert user_activity:", actErr.message);
-            }
-
-            // set httpOnly cookies (safe default)
-            try {
-              res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
-              res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
-            } catch (cookieErr) {
-              console.warn("Failed to set auth cookies:", cookieErr);
-            }
-
-            // If explicitly configured, append token+sessionId to redirect (less secure)
-            if (isOAuth && OAUTH_REDIRECT_WITH_TOKEN) {
-              const redirectUrl = new URL("/account", CLIENT_URL);
-              redirectUrl.search = new URLSearchParams({ token, sessionId: String(sessionId), name }).toString();
-              return res.redirect(redirectUrl.toString());
-            }
-
-            // If OAuth flow -> redirect to client without exposing token by default
-            if (isOAuth) {
-              const redirectUrl = new URL("/account", CLIENT_URL);
-              return res.redirect(redirectUrl.toString());
-            }
-
-            // For non-OAuth JSON-based logins return token+sessionId+user
-            return res.json({
-              message: "Success",
-              token,
-              sessionId,
-              user: { id: userId, name, email: normalizedEmail, phone, is_admin: isAdmin },
-            });
-          }
-        );
-      }
-    );
-  } catch (err) {
-    console.error("Token issuance failed:", err);
-    if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=token_issue_failed`);
-    return res.status(500).json({ message: "Failed to issue token" });
-  }
-}
-
-// ---------- Google OAuth routes ----------
-app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
-
-app.get(
-  "/api/auth/google/callback",
-  passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
-  async (req, res) => {
-    try {
-      const emailRaw = req.user?.email;
-      const email = typeof emailRaw === "string" ? emailRaw.toLowerCase() : null;
-      const nameFromGoogle = (req.user?.name || "").trim();
-      if (!email) return res.status(400).json({ message: "Missing email from Google" });
-
-      // Check if user exists or create (email normalized)
-      db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-        if (err) {
-          console.error("DB error on Google callback:", err);
-          return res.redirect(`${CLIENT_URL}/login?error=db_error`);
-        }
-
-        if (!row) {
-          // create user then issue token with activityType 'register'
-          const safeName = nameFromGoogle || email.split("@")[0];
-          const randomPassword = crypto.randomBytes(16).toString("hex");
-          const hashedPassword = await bcrypt.hash(randomPassword, 10);
-
-          db.run(
-            "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
-            [safeName, email, null, hashedPassword],
-            function (insertErr) {
-              if (insertErr) {
-                console.error("Insert user error:", insertErr);
-                return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
-              }
-              const newUserId = this.lastID;
-              return issueTokenAndRespond(req, res, newUserId, email, safeName, 0, true, "register");
-            }
-          );
-        } else {
-          // existing user: login, activityType 'login'
-          const userId = row.id;
-          const userName = row.name || nameFromGoogle;
-          const isAdmin = Number(row.is_admin) || 0;
-          return issueTokenAndRespond(req, res, userId, email, userName, isAdmin, true, "login");
-        }
-      });
-    } catch (err) {
-      console.error("Google callback error:", err);
-      return res.redirect(`${CLIENT_URL}/login?error=oauth_failed`);
-    }
-  }
-);
-
-// ---------- REGISTER & LOGIN ----------
-app.post("/api/register", async (req, res) => {
-  const { name, email, phone, password } = req.body;
-  if (!name || !email || !phone || !password) return res.status(400).json({ message: "All fields are required" });
-
-  try {
-    const normalizedEmail = email.toLowerCase();
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    db.run(
-      `INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)`,
-      [name, normalizedEmail, phone, hashedPassword],
-      function (err) {
-        if (err) {
-          if (err.message && err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
-          console.error("Register insert error:", err.message || err);
-          return res.status(500).json({ message: err.message || "Failed to register" });
-        }
-        return issueTokenAndRespond(req, res, this.lastID, normalizedEmail, name, 0, false, "register");
-      }
-    );
-  } catch (error) {
-    console.error("Register error:", error);
-    return res.status(500).json({ message: error.message });
-  }
-});
-
-app.post("/api/login", (req, res) => {
-  const { email, password } = req.body;
-  const normalizedEmail = typeof email === "string" ? email.toLowerCase() : email;
-
-  db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
-    if (err) {
-      console.error("Login DB error:", err);
-      return res.status(500).json({ message: err.message });
-    }
-    if (!row) return res.status(401).json({ message: "User not found" });
-
-    const isMatch = await bcrypt.compare(password, row.password);
-    if (!isMatch) return res.status(401).json({ message: "Invalid password" });
-
-    return issueTokenAndRespond(req, res, row.id, row.email, row.name, row.is_admin, false, "login");
+  const normalizedEmail = email?.toLowerCase() || "";
+  const token = jwt.sign({ id: userId, email: normalizedEmail, is_admin: isAdmin }, JWT_SECRET, {
+    expiresIn: "180d",
   });
-});
-
-// ---------- /api/auth/me  - validate token and return user ----------
-app.get("/api/auth/me", authenticateToken, (req, res) => {
-  const userId = Number(req.user?.id);
-  if (!userId) return res.status(401).json({ message: "Not authenticated" });
-
-  db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, row) => {
-    if (err) {
-      console.error("/api/auth/me DB error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    if (!row) return res.status(404).json({ message: "User not found" });
-
-    // Update last_active for this session if sessionId present
-    const sessionId = req.sessionId;
-    if (sessionId) {
-      db.run("UPDATE user_sessions SET last_active = ? WHERE id = ?", [new Date().toISOString(), sessionId], (uErr) => {
-        if (uErr) console.warn("Failed to update session last_active:", uErr.message);
-      });
-    }
-
-    res.json(row);
-  });
-});
-
-// ---------- Sign out session route ----------
-// Records a 'logout' activity (best-effort) then removes session and clears cookies
-app.post("/api/account/signout-session", authenticateToken, (req, res) => {
-  const sessionId = req.body?.sessionId || req.cookies?.sessionId || req.sessionId;
-  const userId = Number(req.user?.id);
-
-  if (!userId) return res.status(401).json({ message: "Not authenticated" });
 
   const device = getDevice(req);
   const ip = getIP(req);
-  const createdAt = new Date().toISOString();
+  const lastActive = new Date().toISOString();
 
-  // Insert logout activity (best-effort)
+  // Insert session
+  db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, lastActive], function (err) {
+    if (err) console.error("Failed to insert session:", err.message);
+  });
+
+  // Insert activity
   db.run(
-    "INSERT INTO user_activity (user_id, session_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [userId, sessionId || null, "logout", device, ip, createdAt],
+    "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
+    [userId, activityType, device, ip, lastActive],
     function (actErr) {
-      if (actErr) console.warn("Failed to insert logout activity:", actErr.message);
-
-      // Now delete session(s)
-      const stmt = sessionId
-        ? "DELETE FROM user_sessions WHERE id = ? AND user_id = ?"
-        : "DELETE FROM user_sessions WHERE user_id = ?";
-      const params = sessionId ? [sessionId, userId] : [userId];
-
-      db.run(stmt, params, function (err) {
-        if (err) {
-          console.error("Failed to remove session:", err);
-          return res.status(500).json({ message: "Failed to remove session" });
-        }
-
-        // Clear auth cookies
-        res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
-        res.clearCookie("sessionId", { ...AUTH_COOKIE_OPTIONS });
-
-        return res.json({ success: true, removed: this.changes });
-      });
+      if (actErr) console.warn("Failed to insert user_activity:", actErr.message);
     }
   );
+
+  // Set cookie
+  try {
+    res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: 1000 * 60 * 60 * 24 * 180 });
+  } catch (cookieErr) {
+    console.warn("Failed to set auth cookies:", cookieErr);
+  }
+
+  if (isOAuth) return res.redirect(new URL("/account", CLIENT_URL).toString());
+
+  // Return user JSON
+  db.get("SELECT phone FROM users WHERE id = ?", [userId], (err, row) => {
+    const phone = row?.phone || null;
+    res.json({ message: "Success", token, user: { id: userId, name, email: normalizedEmail, phone, is_admin: isAdmin } });
+  });
+}
+
+// ----------- Auth Routes -----------
+// Google OAuth
+app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
+
+app.get("/api/auth/google/callback", passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }), async (req, res) => {
+  try {
+    const email = req.user?.email?.toLowerCase();
+    const nameFromGoogle = req.user?.name?.trim() || "";
+    if (!email) return res.status(400).json({ message: "Missing email from Google" });
+
+    db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
+      if (err) return res.redirect(`${CLIENT_URL}/login?error=db_error`);
+      if (!row) {
+        const randomPassword = crypto.randomBytes(16).toString("hex");
+        const hashedPassword = await bcrypt.hash(randomPassword, 10);
+        const safeName = nameFromGoogle || email.split("@")[0];
+        db.run("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)", [safeName, email, null, hashedPassword], function (insertErr) {
+          if (insertErr) return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
+          return issueTokenAndRespond(req, res, this.lastID, email, safeName, 0, true, "register");
+        });
+      } else {
+        return issueTokenAndRespond(req, res, row.id, email, row.name || nameFromGoogle, Number(row.is_admin), true, "login");
+      }
+    });
+  } catch {
+    return res.redirect(`${CLIENT_URL}/login?error=oauth_failed`);
+  }
 });
 
-// ---------- Get User Profile ----------
+// Register
+app.post("/api/register", async (req, res) => {
+  const { name, email, phone, password } = req.body;
+  if (!name || !email || !phone || !password) return res.status(400).json({ message: "All fields are required" });
+  const normalizedEmail = email.toLowerCase();
+  const hashedPassword = await bcrypt.hash(password, 10);
+
+  db.run("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)", [name, normalizedEmail, phone, hashedPassword], function (err) {
+    if (err?.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
+    if (err) return res.status(500).json({ message: err.message || "Failed to register" });
+    issueTokenAndRespond(req, res, this.lastID, normalizedEmail, name, 0, false, "register");
+  });
+});
+
+// Login
+app.post("/api/login", (req, res) => {
+  const { email, password } = req.body;
+  const normalizedEmail = email?.toLowerCase() || "";
+
+  db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
+    if (err) return res.status(500).json({ message: err.message });
+    if (!row) return res.status(401).json({ message: "User not found" });
+    const isMatch = await bcrypt.compare(password, row.password);
+    if (!isMatch) return res.status(401).json({ message: "Invalid password" });
+    issueTokenAndRespond(req, res, row.id, row.email, row.name, Number(row.is_admin), false, "login");
+  });
+});
+
+// Get current user (/me)
+app.get("/api/auth/me", authenticateToken, (req, res) => {
+  const userId = Number(req.user?.id);
+  db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, row) => {
+    if (err) return res.status(500).json({ message: "Database error" });
+    if (!row) return res.status(404).json({ message: "User not found" });
+
+    // update last_active
+    db.run("UPDATE user_sessions SET last_active = ? WHERE user_id = ?", [new Date().toISOString(), userId]);
+    res.json(row);
+  });
+});
+
+// Get user profile
 app.get("/api/users/:id", authenticateToken, (req, res) => {
   const requestedId = Number(req.params.id);
   if (requestedId !== Number(req.user.id)) return res.status(403).json({ message: "Access denied" });
-
   db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [requestedId], (err, row) => {
-    if (err) {
-      console.error("GET /api/users/:id DB error:", err);
-      return res.status(500).json({ message: err.message });
-    }
+    if (err) return res.status(500).json({ message: err.message });
     if (!row) return res.status(404).json({ message: "User not found" });
     res.json(row);
   });
 });
 
-// ---------- Update User Profile ----------
+// Update user profile
 app.put("/api/users/:id", authenticateToken, (req, res) => {
   const requestedId = Number(req.params.id);
   if (requestedId !== Number(req.user.id)) return res.status(403).json({ message: "Access denied" });
@@ -454,23 +307,34 @@ app.put("/api/users/:id", authenticateToken, (req, res) => {
   if (!name || !email || !phone) return res.status(400).json({ message: "All fields are required" });
 
   db.run("UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?", [name, email, phone, requestedId], function (err) {
-    if (err) {
-      console.error("PUT /api/users/:id DB error:", err);
-      return res.status(500).json({ message: err.message });
-    }
+    if (err) return res.status(500).json({ message: err.message });
     if (this.changes === 0) return res.status(404).json({ message: "User not found" });
-
     db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [requestedId], (err2, row) => {
-      if (err2) {
-        console.error("GET after update DB error:", err2);
-        return res.status(500).json({ message: err2.message });
-      }
+      if (err2) return res.status(500).json({ message: err2.message });
       res.json(row);
     });
   });
 });
 
-// ---------- Mount other feature routes ----------
+// Logout
+app.post("/api/account/signout-session", authenticateToken, (req, res) => {
+  const userId = Number(req.user?.id);
+  if (!userId) return res.status(401).json({ message: "Not authenticated" });
+
+  const device = getDevice(req);
+  const ip = getIP(req);
+  const createdAt = new Date().toISOString();
+
+  db.run("INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)", [userId, "logout", device, ip, createdAt]);
+
+  db.run("DELETE FROM user_sessions WHERE user_id = ?", [userId], function (err) {
+    if (err) return res.status(500).json({ message: "Failed to remove session" });
+    res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
+    return res.json({ success: true, removed: this.changes });
+  });
+});
+
+// ----------- Mount routes -----------
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/products", productsRouter);
 app.use("/api/cart", cartRouter);
@@ -480,7 +344,7 @@ app.use("/api/user/orders", authenticateToken, userOrdersRoutes);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/account", accountSettingsRoutes);
-app.use("/api/featured", featuredRoutes); // mounted (was imported earlier but not mounted)
+app.use("/api/featured", featuredRoutes);
 
 app.use("/api/admin/products", auth, adminProductsRoutes);
 app.use("/api/admin/orders", auth, adminOrdersRoutes);
@@ -500,10 +364,10 @@ app.get("/test-env", (req, res) => {
   });
 });
 
-// 404 handler for API paths
-app.use((req, res, next) => {
+// 404 handler
+app.use((req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ message: "API route not found" });
-  next();
+  res.status(404).send("Not Found");
 });
 
 // Global error handler
