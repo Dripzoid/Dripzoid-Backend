@@ -73,7 +73,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
 });
 app.locals.db = db;
 
-// Create tables if missing
+// Create tables if missing (idempotent)
 db.serialize(() => {
   db.run(
     `CREATE TABLE IF NOT EXISTS users (
@@ -178,87 +178,149 @@ passport.use(
 
 // ----------- Utility: Issue token & activity ----------
 function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
-  const normalizedEmail = email?.toLowerCase() || "";
-  const token = jwt.sign({ id: userId, email: normalizedEmail, is_admin: isAdmin }, JWT_SECRET, {
-    expiresIn: "180d",
-  });
-
-  const device = getDevice(req);
-  const ip = getIP(req);
-  const lastActive = new Date().toISOString();
-
-  // Insert session
-  db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, lastActive], function (err) {
-    if (err) console.error("Failed to insert session:", err.message);
-  });
-
-  // Insert activity
-  // In issueTokenAndRespond, after inserting user_sessions:
-db.run(
-  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-  [userId, device, ip, lastActive],
-  function (err) {
-    const sessionId = this.lastID; // <-- keep for frontend
-    // insert user_activity without sessionId
-    db.run(
-      "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
-      [userId, activityType, device, ip, lastActive]
-    );
-
-    // Return JSON to frontend
-    db.get("SELECT phone FROM users WHERE id = ?", [userId], (err, row) => {
-      res.json({
-        message: "Success",
-        token,
-        sessionId,        // <-- include for frontend
-        user: { id: userId, name, email: normalizedEmail, phone: row?.phone || null, is_admin: isAdmin },
-      });
+  try {
+    const normalizedEmail = typeof email === "string" ? email.toLowerCase() : "";
+    const token = jwt.sign({ id: userId, email: normalizedEmail, is_admin: isAdmin }, JWT_SECRET, {
+      expiresIn: "180d",
     });
-  }
-);
 
+    const device = getDevice(req);
+    const ip = getIP(req);
+    const lastActive = new Date().toISOString();
+    const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180; // 180 days
+
+    // Insert into user_sessions and use the lastID as sessionId
+    db.run(
+      "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+      [userId, device, ip, lastActive],
+      function (err2) {
+        if (err2) {
+          console.error("Failed to insert session:", err2.message);
+          if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=session_create_failed`);
+          return res.status(500).json({ message: "Failed to create session" });
+        }
+
+        const sessionId = this.lastID;
+
+        // Insert activity (no session_id column)
+        db.run(
+          "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
+          [userId, activityType, device, ip, lastActive],
+          function (actErr) {
+            if (actErr) {
+              console.warn("Failed to insert user_activity:", actErr.message);
+            }
+
+            // Set httpOnly cookies (frontend can optionally read cookies or call /api/auth/me)
+            try {
+              res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
+              res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
+            } catch (cookieErr) {
+              console.warn("Failed to set auth cookies:", cookieErr);
+            }
+
+            // OAuth flow: redirect to client (no token in URL)
+            if (isOAuth) {
+              const redirectUrl = new URL("/account", CLIENT_URL);
+              return res.redirect(redirectUrl.toString());
+            }
+
+            // Non-OAuth / API clients: respond with JSON (include sessionId + phone)
+            db.get("SELECT phone FROM users WHERE id = ?", [userId], (err, row) => {
+              const phone = row?.phone || null;
+              return res.json({
+                message: "Success",
+                token,
+                sessionId,
+                user: { id: userId, name, email: normalizedEmail, phone, is_admin: isAdmin },
+              });
+            });
+          }
+        );
+      }
+    );
+  } catch (err) {
+    console.error("Token issuance failed:", err);
+    if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=token_issue_failed`);
+    return res.status(500).json({ message: "Failed to issue token" });
+  }
+}
 
 // ----------- Auth Routes -----------
 // Google OAuth
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
-app.get("/api/auth/google/callback", passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }), async (req, res) => {
-  try {
-    const email = req.user?.email?.toLowerCase();
-    const nameFromGoogle = req.user?.name?.trim() || "";
-    if (!email) return res.status(400).json({ message: "Missing email from Google" });
+app.get(
+  "/api/auth/google/callback",
+  passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
+  async (req, res) => {
+    try {
+      const emailRaw = req.user?.email;
+      const email = typeof emailRaw === "string" ? emailRaw.toLowerCase() : null;
+      const nameFromGoogle = (req.user?.name || "").trim();
+      if (!email) return res.status(400).json({ message: "Missing email from Google" });
 
-    db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-      if (err) return res.redirect(`${CLIENT_URL}/login?error=db_error`);
-      if (!row) {
-        const randomPassword = crypto.randomBytes(16).toString("hex");
-        const hashedPassword = await bcrypt.hash(randomPassword, 10);
-        const safeName = nameFromGoogle || email.split("@")[0];
-        db.run("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)", [safeName, email, null, hashedPassword], function (insertErr) {
-          if (insertErr) return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
-          return issueTokenAndRespond(req, res, this.lastID, email, safeName, 0, true, "register");
-        });
-      } else {
-        return issueTokenAndRespond(req, res, row.id, email, row.name || nameFromGoogle, Number(row.is_admin), true, "login");
-      }
-    });
-  } catch {
-    return res.redirect(`${CLIENT_URL}/login?error=oauth_failed`);
+      // Check if user exists or create
+      db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
+        if (err) {
+          console.error("DB error on Google callback:", err);
+          return res.redirect(`${CLIENT_URL}/login?error=db_error`);
+        }
+
+        if (!row) {
+          const safeName = nameFromGoogle || email.split("@")[0];
+          const randomPassword = crypto.randomBytes(16).toString("hex");
+          const hashedPassword = await bcrypt.hash(randomPassword, 10);
+
+          db.run(
+            "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
+            [safeName, email, null, hashedPassword],
+            function (insertErr) {
+              if (insertErr) {
+                console.error("Insert user error:", insertErr);
+                return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
+              }
+              const newUserId = this.lastID;
+              return issueTokenAndRespond(req, res, newUserId, email, safeName, 0, true, "register");
+            }
+          );
+        } else {
+          const userId = row.id;
+          const userName = row.name || nameFromGoogle;
+          const isAdmin = Number(row.is_admin) || 0;
+          return issueTokenAndRespond(req, res, userId, email, userName, isAdmin, true, "login");
+        }
+      });
+    } catch (err) {
+      console.error("Google callback error:", err);
+      return res.redirect(`${CLIENT_URL}/login?error=oauth_failed`);
+    }
   }
-});
+);
 
 // Register
 app.post("/api/register", async (req, res) => {
   const { name, email, phone, password } = req.body;
   if (!name || !email || !phone || !password) return res.status(400).json({ message: "All fields are required" });
   const normalizedEmail = email.toLowerCase();
-  const hashedPassword = await bcrypt.hash(password, 10);
-
-  db.run("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)", [name, normalizedEmail, phone, hashedPassword], function (err) {
-    if (err?.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
-    if (err) return res.status(500).json({ message: err.message || "Failed to register" });
-    issueTokenAndRespond(req, res, this.lastID, normalizedEmail, name, 0, false, "register");
-  });
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    db.run(
+      "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
+      [name, normalizedEmail, phone, hashedPassword],
+      function (err) {
+        if (err) {
+          if (err.message && err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
+          console.error("Register insert error:", err.message || err);
+          return res.status(500).json({ message: err.message || "Failed to register" });
+        }
+        return issueTokenAndRespond(req, res, this.lastID, normalizedEmail, name, 0, false, "register");
+      }
+    );
+  } catch (error) {
+    console.error("Register error:", error);
+    return res.status(500).json({ message: error.message });
+  }
 });
 
 // Login
@@ -267,23 +329,36 @@ app.post("/api/login", (req, res) => {
   const normalizedEmail = email?.toLowerCase() || "";
 
   db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
-    if (err) return res.status(500).json({ message: err.message });
+    if (err) {
+      console.error("Login DB error:", err);
+      return res.status(500).json({ message: err.message });
+    }
     if (!row) return res.status(401).json({ message: "User not found" });
+
     const isMatch = await bcrypt.compare(password, row.password);
     if (!isMatch) return res.status(401).json({ message: "Invalid password" });
-    issueTokenAndRespond(req, res, row.id, row.email, row.name, Number(row.is_admin), false, "login");
+
+    return issueTokenAndRespond(req, res, row.id, row.email, row.name, Number(row.is_admin), false, "login");
   });
 });
 
 // Get current user (/me)
 app.get("/api/auth/me", authenticateToken, (req, res) => {
   const userId = Number(req.user?.id);
+  if (!userId) return res.status(401).json({ message: "Not authenticated" });
+
   db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, row) => {
-    if (err) return res.status(500).json({ message: "Database error" });
+    if (err) {
+      console.error("/api/auth/me DB error:", err);
+      return res.status(500).json({ message: "Database error" });
+    }
     if (!row) return res.status(404).json({ message: "User not found" });
 
-    // update last_active
-    db.run("UPDATE user_sessions SET last_active = ? WHERE user_id = ?", [new Date().toISOString(), userId]);
+    // update last_active for this user's sessions
+    db.run("UPDATE user_sessions SET last_active = ? WHERE user_id = ?", [new Date().toISOString(), userId], (uErr) => {
+      if (uErr) console.warn("Failed to update session last_active:", uErr.message);
+    });
+
     res.json(row);
   });
 });
@@ -317,7 +392,7 @@ app.put("/api/users/:id", authenticateToken, (req, res) => {
   });
 });
 
-// Logout
+// Logout (sign out all sessions for the user)
 app.post("/api/account/signout-session", authenticateToken, (req, res) => {
   const userId = Number(req.user?.id);
   if (!userId) return res.status(401).json({ message: "Not authenticated" });
@@ -326,12 +401,16 @@ app.post("/api/account/signout-session", authenticateToken, (req, res) => {
   const ip = getIP(req);
   const createdAt = new Date().toISOString();
 
-  db.run("INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)", [userId, "logout", device, ip, createdAt]);
-
-  db.run("DELETE FROM user_sessions WHERE user_id = ?", [userId], function (err) {
-    if (err) return res.status(500).json({ message: "Failed to remove session" });
-    res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
-    return res.json({ success: true, removed: this.changes });
+  // record logout activity (best-effort)
+  db.run("INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)", [userId, "logout", device, ip, createdAt], (actErr) => {
+    if (actErr) console.warn("Failed to insert logout activity:", actErr.message);
+    // delete sessions for user
+    db.run("DELETE FROM user_sessions WHERE user_id = ?", [userId], function (err) {
+      if (err) return res.status(500).json({ message: "Failed to remove session" });
+      res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
+      res.clearCookie("sessionId", { ...AUTH_COOKIE_OPTIONS });
+      return res.json({ success: true, removed: this.changes });
+    });
   });
 });
 
@@ -379,8 +458,6 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-  
-module.exports = { app, db };
 
-
-
+// ESM export
+export { app, db };
