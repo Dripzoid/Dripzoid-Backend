@@ -343,25 +343,27 @@ app.post("/api/login", (req, res) => {
 });
 
 // Get current user (/me)
-app.get("/api/auth/me", authenticateToken, (req, res) => {
-  const userId = Number(req.user?.id);
-  if (!userId) return res.status(401).json({ message: "Not authenticated" });
+app.get("/api/auth/me", authenticate, (req, res) => {
+  const { id, email, is_admin } = req.user;
+  const sessionId = req.cookies.sessionId;
 
-  db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, row) => {
-    if (err) {
-      console.error("/api/auth/me DB error:", err);
-      return res.status(500).json({ message: "Database error" });
-    }
-    if (!row) return res.status(404).json({ message: "User not found" });
+  db.get("SELECT * FROM user_sessions WHERE id = ? AND user_id = ?", [sessionId, id], (err, row) => {
+    if (err) return res.status(500).json({ message: "DB error" });
+    if (!row) return res.status(401).json({ message: "Invalid session" });
 
-    // update last_active for this user's sessions
-    db.run("UPDATE user_sessions SET last_active = ? WHERE user_id = ?", [new Date().toISOString(), userId], (uErr) => {
-      if (uErr) console.warn("Failed to update session last_active:", uErr.message);
+    db.get("SELECT * FROM users WHERE id = ?", [id], (err2, userRow) => {
+      if (err2) return res.status(500).json({ message: "DB error" });
+      if (!userRow) return res.status(404).json({ message: "User not found" });
+
+      res.json({
+        message: "Session valid",
+        user: userRow,
+        sessionId
+      });
     });
-
-    res.json(row);
   });
 });
+
 
 // Get user profile
 app.get("/api/users/:id", authenticateToken, (req, res) => {
@@ -461,3 +463,4 @@ app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 // ESM export
 export { app, db };
+
