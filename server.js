@@ -193,29 +193,30 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
   });
 
   // Insert activity
-  db.run(
-    "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
-    [userId, activityType, device, ip, lastActive],
-    function (actErr) {
-      if (actErr) console.warn("Failed to insert user_activity:", actErr.message);
-    }
-  );
+  // In issueTokenAndRespond, after inserting user_sessions:
+db.run(
+  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+  [userId, device, ip, lastActive],
+  function (err) {
+    const sessionId = this.lastID; // <-- keep for frontend
+    // insert user_activity without sessionId
+    db.run(
+      "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
+      [userId, activityType, device, ip, lastActive]
+    );
 
-  // Set cookie
-  try {
-    res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: 1000 * 60 * 60 * 24 * 180 });
-  } catch (cookieErr) {
-    console.warn("Failed to set auth cookies:", cookieErr);
+    // Return JSON to frontend
+    db.get("SELECT phone FROM users WHERE id = ?", [userId], (err, row) => {
+      res.json({
+        message: "Success",
+        token,
+        sessionId,        // <-- include for frontend
+        user: { id: userId, name, email: normalizedEmail, phone: row?.phone || null, is_admin: isAdmin },
+      });
+    });
   }
+);
 
-  if (isOAuth) return res.redirect(new URL("/account", CLIENT_URL).toString());
-
-  // Return user JSON
-  db.get("SELECT phone FROM users WHERE id = ?", [userId], (err, row) => {
-    const phone = row?.phone || null;
-    res.json({ message: "Success", token, user: { id: userId, name, email: normalizedEmail, phone, is_admin: isAdmin } });
-  });
-}
 
 // ----------- Auth Routes -----------
 // Google OAuth
@@ -380,3 +381,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
