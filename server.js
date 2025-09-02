@@ -49,13 +49,22 @@ if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
 }
 
 // CORS
-app.use(cors({ origin: CLIENT_URL, credentials: true }));
+app.use(
+  cors({
+    origin: CLIENT_URL,
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Cloudinary config
-if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+// Cloudinary config (optional)
+if (
+  process.env.CLOUDINARY_CLOUD_NAME &&
+  process.env.CLOUDINARY_API_KEY &&
+  process.env.CLOUDINARY_API_SECRET
+) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
@@ -86,6 +95,7 @@ db.serialize(() => {
       created_at TEXT DEFAULT (datetime('now', 'localtime'))
     )`
   );
+
   db.run(
     `CREATE TABLE IF NOT EXISTS user_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +105,7 @@ db.serialize(() => {
       last_active TEXT
     )`
   );
+
   db.run(
     `CREATE TABLE IF NOT EXISTS user_activity (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +137,8 @@ function getIP(req) {
   return req.ip || req.socket?.remoteAddress || "Unknown IP";
 }
 
+const TOKEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 180; // 180 days
+
 const AUTH_COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
@@ -133,18 +146,18 @@ const AUTH_COOKIE_OPTIONS = {
   path: "/",
 };
 
-// JWT middleware
+// JWT middleware — validate token (Authorization header or cookie)
 function authenticateToken(req, res, next) {
   try {
     let token = null;
     const authHeader = req.headers["authorization"];
-    if (authHeader?.startsWith("Bearer ")) token = authHeader.split(" ")[1];
-    if (!token && req.cookies?.token) token = req.cookies.token;
+    if (authHeader && authHeader.startsWith("Bearer ")) token = authHeader.split(" ")[1];
+    if (!token && req.cookies && req.cookies.token) token = req.cookies.token;
     if (!token) return res.status(401).json({ message: "No token provided" });
 
     jwt.verify(token, JWT_SECRET, (err, payload) => {
       if (err) return res.status(403).json({ message: "Invalid or expired token" });
-      req.user = payload;
+      req.user = payload; // { id, email, is_admin }
       next();
     });
   } catch (err) {
@@ -177,6 +190,14 @@ passport.use(
 );
 
 // ----------- Utility: Issue token & activity ----------
+/**
+ * issueTokenAndRespond:
+ * - creates a user_sessions row (DB-persistent)
+ * - logs an entry in user_activity (no session_id)
+ * - sets httpOnly cookies for token + sessionId
+ * - for isOAuth -> redirect to client /account (frontend should call /api/auth/me to hydrate)
+ * - for non-OAuth -> return JSON { message, token, sessionId, user }
+ */
 function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
   try {
     const normalizedEmail = typeof email === "string" ? email.toLowerCase() : "";
@@ -187,9 +208,8 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
     const device = getDevice(req);
     const ip = getIP(req);
     const lastActive = new Date().toISOString();
-    const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180; // 180 days
 
-    // Insert into user_sessions and use the lastID as sessionId
+    // Insert into user_sessions
     db.run(
       "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
       [userId, device, ip, lastActive],
@@ -202,41 +222,39 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
 
         const sessionId = this.lastID;
 
-        // Insert activity (no session_id column)
+        // Log activity (best-effort)
         db.run(
           "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
           [userId, activityType, device, ip, lastActive],
           function (actErr) {
-            if (actErr) {
-              console.warn("Failed to insert user_activity:", actErr.message);
-            }
-
-            // Set httpOnly cookies (frontend can optionally read cookies or call /api/auth/me)
-            try {
-              res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
-              res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
-            } catch (cookieErr) {
-              console.warn("Failed to set auth cookies:", cookieErr);
-            }
-
-            // OAuth flow: redirect to client (no token in URL)
-            if (isOAuth) {
-              const redirectUrl = new URL("/account", CLIENT_URL);
-              return res.redirect(redirectUrl.toString());
-            }
-
-            // Non-OAuth / API clients: respond with JSON (include sessionId + phone)
-            db.get("SELECT phone FROM users WHERE id = ?", [userId], (err, row) => {
-              const phone = row?.phone || null;
-              return res.json({
-                message: "Success",
-                token,
-                sessionId,
-                user: { id: userId, name, email: normalizedEmail, phone, is_admin: isAdmin },
-              });
-            });
+            if (actErr) console.warn("Failed to insert user_activity:", actErr.message);
+            // continue
           }
         );
+
+        // Set httpOnly cookies for client; token and sessionId
+        try {
+          res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
+          res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
+        } catch (cookieErr) {
+          console.warn("Failed to set auth cookies:", cookieErr);
+        }
+
+        // OAuth flow: redirect to client /account (frontend should call /api/auth/me to hydrate)
+        if (isOAuth) {
+          return res.redirect(new URL("/account", CLIENT_URL).toString());
+        }
+
+        // Non-OAuth: return JSON with token, sessionId and user (including phone)
+        db.get("SELECT phone FROM users WHERE id = ?", [userId], (err, row) => {
+          const phone = row?.phone || null;
+          return res.json({
+            message: "Success",
+            token,
+            sessionId,
+            user: { id: userId, name, email: normalizedEmail, phone, is_admin: isAdmin },
+          });
+        });
       }
     );
   } catch (err) {
@@ -247,9 +265,10 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
 }
 
 // ----------- Auth Routes -----------
-// Google OAuth
+// Google OAuth entry
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
+// Google OAuth callback
 app.get(
   "/api/auth/google/callback",
   passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
@@ -260,7 +279,7 @@ app.get(
       const nameFromGoogle = (req.user?.name || "").trim();
       if (!email) return res.status(400).json({ message: "Missing email from Google" });
 
-      // Check if user exists or create
+      // find or create user
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
         if (err) {
           console.error("DB error on Google callback:", err);
@@ -268,6 +287,7 @@ app.get(
         }
 
         if (!row) {
+          // create
           const safeName = nameFromGoogle || email.split("@")[0];
           const randomPassword = crypto.randomBytes(16).toString("hex");
           const hashedPassword = await bcrypt.hash(randomPassword, 10);
@@ -285,6 +305,7 @@ app.get(
             }
           );
         } else {
+          // existing user -> issue token and session
           const userId = row.id;
           const userName = row.name || nameFromGoogle;
           const isAdmin = Number(row.is_admin) || 0;
@@ -302,6 +323,7 @@ app.get(
 app.post("/api/register", async (req, res) => {
   const { name, email, phone, password } = req.body;
   if (!name || !email || !phone || !password) return res.status(400).json({ message: "All fields are required" });
+
   const normalizedEmail = email.toLowerCase();
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -326,7 +348,7 @@ app.post("/api/register", async (req, res) => {
 // Login
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
-  const normalizedEmail = email?.toLowerCase() || "";
+  const normalizedEmail = typeof email === "string" ? email.toLowerCase() : "";
 
   db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
     if (err) {
@@ -342,30 +364,100 @@ app.post("/api/login", (req, res) => {
   });
 });
 
-// Get current user (/me)
+// ----------- /api/auth/me -----------
+/**
+ * Robust /api/auth/me:
+ * - Requires valid JWT (authenticateToken)
+ * - If sessionId cookie exists and matches DB -> returns that session
+ * - If not present or invalid -> creates a new session row, sets sessionId cookie and returns it
+ * - Always returns: { message, user, sessionId }
+ */
 app.get("/api/auth/me", authenticateToken, (req, res) => {
-  const { id, email, is_admin } = req.user;
-  const sessionId = req.cookies.sessionId;
+  try {
+    const userId = Number(req.user?.id);
+    if (!userId) return res.status(401).json({ message: "Not authenticated" });
 
-  db.get("SELECT * FROM user_sessions WHERE id = ? AND user_id = ?", [sessionId, id], (err, row) => {
-    if (err) return res.status(500).json({ message: "DB error" });
-    if (!row) return res.status(401).json({ message: "Invalid session" });
+    const cookieSessionId = req.cookies?.sessionId;
+    const device = getDevice(req);
+    const ip = getIP(req);
+    const now = new Date().toISOString();
 
-    db.get("SELECT * FROM users WHERE id = ?", [id], (err2, userRow) => {
-      if (err2) return res.status(500).json({ message: "DB error" });
-      if (!userRow) return res.status(404).json({ message: "User not found" });
-
-      res.json({
-        message: "Session valid",
-        user: userRow,
-        sessionId
+    const returnUserAndSession = (sessionId) => {
+      // update last_active for the session (best-effort)
+      db.run("UPDATE user_sessions SET last_active = ? WHERE id = ?", [now, sessionId], (uErr) => {
+        if (uErr) console.warn("Failed to update session last_active:", uErr.message);
       });
-    });
-  });
+
+      db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (uErr, userRow) => {
+        if (uErr) return res.status(500).json({ message: "DB error" });
+        if (!userRow) return res.status(404).json({ message: "User not found" });
+
+        // Ensure token cookie exists / refresh it so browser retains it
+        try {
+          const token = jwt.sign({ id: userRow.id, email: userRow.email, is_admin: userRow.is_admin }, JWT_SECRET, { expiresIn: "180d" });
+          res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
+        } catch (cookieErr) {
+          console.warn("Failed to refresh token cookie:", cookieErr);
+        }
+
+        return res.json({
+          message: "Session valid",
+          user: userRow,
+          sessionId,
+        });
+      });
+    };
+
+    if (cookieSessionId) {
+      // verify session exists and belongs to user
+      db.get("SELECT * FROM user_sessions WHERE id = ? AND user_id = ?", [cookieSessionId, userId], (err, row) => {
+        if (err) {
+          console.error("/api/auth/me DB error:", err);
+          return res.status(500).json({ message: "DB error" });
+        }
+        if (row) {
+          // session valid
+          return returnUserAndSession(cookieSessionId);
+        } else {
+          // sessionId cookie present but not valid -> create a new session and set cookie
+          db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, now], function (insErr) {
+            if (insErr) {
+              console.error("Failed to create session in /api/auth/me:", insErr);
+              return res.status(500).json({ message: "Failed to create session" });
+            }
+            const newSessionId = this.lastID;
+            try {
+              res.cookie("sessionId", String(newSessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
+            } catch (cookieErr) {
+              console.warn("Failed to set sessionId cookie in /api/auth/me:", cookieErr);
+            }
+            return returnUserAndSession(newSessionId);
+          });
+        }
+      });
+    } else {
+      // No session cookie: create new session entry and set cookie
+      db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, now], function (insErr) {
+        if (insErr) {
+          console.error("Failed to create session in /api/auth/me:", insErr);
+          return res.status(500).json({ message: "Failed to create session" });
+        }
+        const newSessionId = this.lastID;
+        try {
+          res.cookie("sessionId", String(newSessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
+        } catch (cookieErr) {
+          console.warn("Failed to set sessionId cookie in /api/auth/me:", cookieErr);
+        }
+        return returnUserAndSession(newSessionId);
+      });
+    }
+  } catch (err) {
+    console.error("/api/auth/me error:", err);
+    return res.status(500).json({ message: "Internal error" });
+  }
 });
 
-
-// Get user profile
+// ----------- User profile endpoints -----------
 app.get("/api/users/:id", authenticateToken, (req, res) => {
   const requestedId = Number(req.params.id);
   if (requestedId !== Number(req.user.id)) return res.status(403).json({ message: "Access denied" });
@@ -376,7 +468,6 @@ app.get("/api/users/:id", authenticateToken, (req, res) => {
   });
 });
 
-// Update user profile
 app.put("/api/users/:id", authenticateToken, (req, res) => {
   const requestedId = Number(req.params.id);
   if (requestedId !== Number(req.user.id)) return res.status(403).json({ message: "Access denied" });
@@ -394,29 +485,43 @@ app.put("/api/users/:id", authenticateToken, (req, res) => {
   });
 });
 
-// Logout (sign out all sessions for the user)
+// Logout — deletes sessions (either all for user or a specific one if provided)
 app.post("/api/account/signout-session", authenticateToken, (req, res) => {
   const userId = Number(req.user?.id);
   if (!userId) return res.status(401).json({ message: "Not authenticated" });
 
+  const providedSessionId = req.body?.sessionId || req.cookies?.sessionId || null;
   const device = getDevice(req);
   const ip = getIP(req);
   const createdAt = new Date().toISOString();
 
-  // record logout activity (best-effort)
-  db.run("INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)", [userId, "logout", device, ip, createdAt], (actErr) => {
-    if (actErr) console.warn("Failed to insert logout activity:", actErr.message);
-    // delete sessions for user
-    db.run("DELETE FROM user_sessions WHERE user_id = ?", [userId], function (err) {
-      if (err) return res.status(500).json({ message: "Failed to remove session" });
-      res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
-      res.clearCookie("sessionId", { ...AUTH_COOKIE_OPTIONS });
-      return res.json({ success: true, removed: this.changes });
-    });
-  });
+  // Log logout activity (best-effort)
+  db.run(
+    "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
+    [userId, "logout", device, ip, createdAt],
+    (actErr) => {
+      if (actErr) console.warn("Failed to insert logout activity:", actErr.message);
+
+      const stmt = providedSessionId ? "DELETE FROM user_sessions WHERE id = ? AND user_id = ?" : "DELETE FROM user_sessions WHERE user_id = ?";
+      const params = providedSessionId ? [providedSessionId, userId] : [userId];
+
+      db.run(stmt, params, function (err) {
+        if (err) {
+          console.error("Failed to remove session(s):", err);
+          return res.status(500).json({ message: "Failed to remove session" });
+        }
+
+        // Clear cookies
+        res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
+        res.clearCookie("sessionId", { ...AUTH_COOKIE_OPTIONS });
+
+        return res.json({ success: true, removed: this.changes });
+      });
+    }
+  );
 });
 
-// ----------- Mount routes -----------
+// ----------- Mount feature routes -----------
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/products", productsRouter);
 app.use("/api/cart", cartRouter);
@@ -461,7 +566,5 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
-// ESM export
+// ESM export (keep this since package.json has "type": "module")
 export { app, db };
-
-
