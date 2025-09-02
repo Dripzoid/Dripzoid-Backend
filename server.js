@@ -343,7 +343,7 @@ app.post("/api/login", (req, res) => {
 });
 
 // Get current user (/me)
-app.get("/api/auth/me", authenticate, (req, res) => {
+app.get("/api/auth/me", authenticateToken, (req, res) => {
   const { id, email, is_admin } = req.user;
   const sessionId = req.cookies.sessionId;
 
@@ -463,4 +463,5 @@ app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 // ESM export
 export { app, db };
+
 
