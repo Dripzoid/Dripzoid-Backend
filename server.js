@@ -201,7 +201,7 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
             message: "Success",
             token,
             sessionId,
-            user: { id: userId, name, email, is_admin: isAdmin },
+            user: { id: userId, name, email, phone, is_admin: isAdmin },
           });
         }
       }
@@ -450,4 +450,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
 
