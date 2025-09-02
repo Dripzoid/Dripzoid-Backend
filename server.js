@@ -167,8 +167,9 @@ passport.use(
 function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false) {
   try {
     const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, {
-      expiresIn: "180d", // consider shorter expiry + refresh tokens in future
+      expiresIn: "180d",
     });
+
     const device = getDevice(req);
     const ip = getIP(req);
     const lastActive = new Date().toISOString();
@@ -184,19 +185,18 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
         }
 
         const sessionId = this.lastID;
-        const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180; // 180 days in ms (align with token expiry)
+        const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180;
 
         if (isOAuth) {
-          // Set httpOnly cookie for token and sessionId so token isn't exposed in URL/localStorage
+          // Store token + sessionId in cookies (frontend can later sync to localStorage)
           res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
           res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
 
-          // Redirect to client account page WITHOUT token in URL
+          // ✅ Redirect without leaking sessionId or name in URL
           const redirectUrl = new URL("/account", CLIENT_URL);
-          redirectUrl.search = new URLSearchParams({ sessionId: String(sessionId), name }).toString();
           return res.redirect(redirectUrl.toString());
         } else {
-          // For API clients (non-OAuth), respond with JSON (token + sessionId)
+          // Normal API login → JSON response
           return res.json({
             message: "Success",
             token,
@@ -212,6 +212,7 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
     return res.status(500).json({ message: "Failed to issue token" });
   }
 }
+
 
 // ---------- Google OAuth routes ----------
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
@@ -449,3 +450,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
+
