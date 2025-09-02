@@ -37,14 +37,17 @@ import votesRouter from "./votes.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000"; // front-end URL
 const API_BASE = process.env.API_BASE || "http://localhost:5000";
 const JWT_SECRET = process.env.JWT_SECRET || "Dripzoid.App@2025";
+
+// If true, server will append token+sessionId to the redirect URL after OAuth.
+// WARNING: this is less secure (token will be in URL). Keep as false in production.
+const OAUTH_REDIRECT_WITH_TOKEN = process.env.OAUTH_REDIRECT_WITH_TOKEN === "1" || process.env.OAUTH_REDIRECT_WITH_TOKEN === "true";
 
 const app = express();
 
 // If running behind a proxy (render/Heroku/Nginx), enable trust proxy.
-// You can set TRUST_PROXY=1 in production env.
 if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
   app.set("trust proxy", 1);
 }
@@ -84,6 +87,30 @@ const db = new sqlite3.Database(dbPath, (err) => {
 });
 app.locals.db = db;
 
+// Ensure required tables exist (safe, idempotent)
+db.serialize(() => {
+  db.run(
+    `CREATE TABLE IF NOT EXISTS user_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      device TEXT,
+      ip TEXT,
+      last_active TEXT
+    )`
+  );
+  db.run(
+    `CREATE TABLE IF NOT EXISTS user_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      session_id INTEGER,
+      type TEXT,
+      device TEXT,
+      ip TEXT,
+      created_at TEXT
+    )`
+  );
+});
+
 // ---------- Helpers ----------
 function getDevice(req) {
   try {
@@ -96,7 +123,6 @@ function getDevice(req) {
   }
 }
 function getIP(req) {
-  // Prefer X-Forwarded-For, else req.ip (respects trust proxy), else socket address
   const xf = req.headers["x-forwarded-for"];
   if (xf) return xf.split(",")[0].trim();
   return req.ip || req.socket?.remoteAddress || "Unknown IP";
@@ -107,7 +133,8 @@ const AUTH_COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
   secure: process.env.NODE_ENV === "production",
-  // maxAge is set dynamically when issuing token to align with token expiry if needed
+  path: "/",
+  // maxAge set dynamically during issuance
 };
 
 // JWT middleware — supports Authorization header or httpOnly cookie
@@ -140,8 +167,7 @@ function authenticateToken(req, res, next) {
 
 // ---------- Passport (Google OAuth) ----------
 app.use(passport.initialize());
-// we do NOT use passport.session() or express-session here to avoid in-memory store.
-// We use JWT + cookies for session persistence.
+// we do NOT use passport.session() here (avoid in-memory store)
 
 passport.use(
   new GoogleStrategy(
@@ -164,10 +190,13 @@ passport.use(
 );
 
 // ---------- Utility: issue token, create session, set cookies or return JSON ----------
-// Adds insertion into user_sessions and user_activity (activityType: 'login'|'register'|'logout' etc.)
+// activityType: 'login' | 'register' | 'logout'
 function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
   try {
-    const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, {
+    // Normalize id/email
+    const normalizedEmail = typeof email === "string" ? email.toLowerCase() : email;
+
+    const token = jwt.sign({ id: userId, email: normalizedEmail, is_admin: isAdmin }, JWT_SECRET, {
       expiresIn: "180d",
     });
 
@@ -175,7 +204,7 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
     const ip = getIP(req);
     const lastActive = new Date().toISOString();
 
-    // Insert user_sessions
+    // Insert session
     db.run(
       "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
       [userId, device, ip, lastActive],
@@ -187,41 +216,46 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
         }
 
         const sessionId = this.lastID;
-        const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180;
+        const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180; // 180 days
         const activityCreatedAt = new Date().toISOString();
 
-        // Insert a corresponding user_activity row (best-effort; don't fail the response if this errors)
+        // Insert activity (best-effort)
         db.run(
           "INSERT INTO user_activity (user_id, session_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)",
           [userId, sessionId, activityType, device, ip, activityCreatedAt],
           function (actErr) {
             if (actErr) {
-              // warn but continue
               console.warn("Failed to insert user_activity:", actErr.message);
             }
 
-            // After recording session + activity, respond
-            if (isOAuth) {
-              // Store token + sessionId in httpOnly cookies (frontend can call /api/auth/me to hydrate)
-              try {
-                res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
-                res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
-              } catch (cookieErr) {
-                console.warn("Failed to set auth cookies:", cookieErr);
-              }
+            // set httpOnly cookies (safe default)
+            try {
+              res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
+              res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
+            } catch (cookieErr) {
+              console.warn("Failed to set auth cookies:", cookieErr);
+            }
 
-              // Redirect to client account page WITHOUT leaking token/sessionId in URL
+            // If explicitly configured, append token+sessionId to redirect (less secure)
+            if (isOAuth && OAUTH_REDIRECT_WITH_TOKEN) {
+              const redirectUrl = new URL("/account", CLIENT_URL);
+              redirectUrl.search = new URLSearchParams({ token, sessionId: String(sessionId), name }).toString();
+              return res.redirect(redirectUrl.toString());
+            }
+
+            // If OAuth flow -> redirect to client without exposing token by default
+            if (isOAuth) {
               const redirectUrl = new URL("/account", CLIENT_URL);
               return res.redirect(redirectUrl.toString());
-            } else {
-              // Normal API login → JSON response
-              return res.json({
-                message: "Success",
-                token,
-                sessionId,
-                user: { id: userId, name, email, is_admin: isAdmin },
-              });
             }
+
+            // For non-OAuth JSON-based logins return token+sessionId+user
+            return res.json({
+              message: "Success",
+              token,
+              sessionId,
+              user: { id: userId, name, email: normalizedEmail, phone, is_admin: isAdmin },
+            });
           }
         );
       }
@@ -241,15 +275,16 @@ app.get(
   passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   async (req, res) => {
     try {
-      const email = req.user?.email;
+      const emailRaw = req.user?.email;
+      const email = typeof emailRaw === "string" ? emailRaw.toLowerCase() : null;
       const nameFromGoogle = (req.user?.name || "").trim();
       if (!email) return res.status(400).json({ message: "Missing email from Google" });
 
-      // Check if user exists or create
-      db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
+      // Check if user exists or create (email normalized)
+      db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
         if (err) {
           console.error("DB error on Google callback:", err);
-          return res.status(500).json({ message: "Database error" });
+          return res.redirect(`${CLIENT_URL}/login?error=db_error`);
         }
 
         if (!row) {
@@ -267,7 +302,6 @@ app.get(
                 return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
               }
               const newUserId = this.lastID;
-              // issue token and record activity as 'register'
               return issueTokenAndRespond(req, res, newUserId, email, safeName, 0, true, "register");
             }
           );
@@ -292,18 +326,19 @@ app.post("/api/register", async (req, res) => {
   if (!name || !email || !phone || !password) return res.status(400).json({ message: "All fields are required" });
 
   try {
+    const normalizedEmail = email.toLowerCase();
     const hashedPassword = await bcrypt.hash(password, 10);
+
     db.run(
       `INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)`,
-      [name, email, phone, hashedPassword],
+      [name, normalizedEmail, phone, hashedPassword],
       function (err) {
         if (err) {
           if (err.message && err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
           console.error("Register insert error:", err.message || err);
           return res.status(500).json({ message: err.message || "Failed to register" });
         }
-        // Inserted new user: issue token and record activityType 'register'
-        return issueTokenAndRespond(req, res, this.lastID, email, name, 0, false, "register");
+        return issueTokenAndRespond(req, res, this.lastID, normalizedEmail, name, 0, false, "register");
       }
     );
   } catch (error) {
@@ -314,7 +349,9 @@ app.post("/api/register", async (req, res) => {
 
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
-  db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
+  const normalizedEmail = typeof email === "string" ? email.toLowerCase() : email;
+
+  db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
     if (err) {
       console.error("Login DB error:", err);
       return res.status(500).json({ message: err.message });
@@ -324,7 +361,6 @@ app.post("/api/login", (req, res) => {
     const isMatch = await bcrypt.compare(password, row.password);
     if (!isMatch) return res.status(401).json({ message: "Invalid password" });
 
-    // Successful login: record activityType 'login'
     return issueTokenAndRespond(req, res, row.id, row.email, row.name, row.is_admin, false, "login");
   });
 });
@@ -365,7 +401,7 @@ app.post("/api/account/signout-session", authenticateToken, (req, res) => {
   const ip = getIP(req);
   const createdAt = new Date().toISOString();
 
-  // Insert logout activity first (best-effort)
+  // Insert logout activity (best-effort)
   db.run(
     "INSERT INTO user_activity (user_id, session_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     [userId, sessionId || null, "logout", device, ip, createdAt],
@@ -384,7 +420,7 @@ app.post("/api/account/signout-session", authenticateToken, (req, res) => {
           return res.status(500).json({ message: "Failed to remove session" });
         }
 
-        // Clear auth cookies (client-side httpOnly cookies)
+        // Clear auth cookies
         res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
         res.clearCookie("sessionId", { ...AUTH_COOKIE_OPTIONS });
 
@@ -444,6 +480,7 @@ app.use("/api/user/orders", authenticateToken, userOrdersRoutes);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/account", accountSettingsRoutes);
+app.use("/api/featured", featuredRoutes); // mounted (was imported earlier but not mounted)
 
 app.use("/api/admin/products", auth, adminProductsRoutes);
 app.use("/api/admin/orders", auth, adminOrdersRoutes);
