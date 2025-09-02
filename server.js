@@ -164,7 +164,8 @@ passport.use(
 );
 
 // ---------- Utility: issue token, create session, set cookies or return JSON ----------
-function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false) {
+// Adds insertion into user_sessions and user_activity (activityType: 'login'|'register'|'logout' etc.)
+function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
   try {
     const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, {
       expiresIn: "180d",
@@ -174,6 +175,7 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
     const ip = getIP(req);
     const lastActive = new Date().toISOString();
 
+    // Insert user_sessions
     db.run(
       "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
       [userId, device, ip, lastActive],
@@ -186,24 +188,42 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
 
         const sessionId = this.lastID;
         const tokenMaxAgeMs = 1000 * 60 * 60 * 24 * 180;
+        const activityCreatedAt = new Date().toISOString();
 
-        if (isOAuth) {
-          // Store token + sessionId in cookies (frontend can later sync to localStorage)
-          res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
-          res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
+        // Insert a corresponding user_activity row (best-effort; don't fail the response if this errors)
+        db.run(
+          "INSERT INTO user_activity (user_id, session_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          [userId, sessionId, activityType, device, ip, activityCreatedAt],
+          function (actErr) {
+            if (actErr) {
+              // warn but continue
+              console.warn("Failed to insert user_activity:", actErr.message);
+            }
 
-          // ✅ Redirect without leaking sessionId or name in URL
-          const redirectUrl = new URL("/account", CLIENT_URL);
-          return res.redirect(redirectUrl.toString());
-        } else {
-          // Normal API login → JSON response
-          return res.json({
-            message: "Success",
-            token,
-            sessionId,
-            user: { id: userId, name, email, phone, is_admin: isAdmin },
-          });
-        }
+            // After recording session + activity, respond
+            if (isOAuth) {
+              // Store token + sessionId in httpOnly cookies (frontend can call /api/auth/me to hydrate)
+              try {
+                res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
+                res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: tokenMaxAgeMs });
+              } catch (cookieErr) {
+                console.warn("Failed to set auth cookies:", cookieErr);
+              }
+
+              // Redirect to client account page WITHOUT leaking token/sessionId in URL
+              const redirectUrl = new URL("/account", CLIENT_URL);
+              return res.redirect(redirectUrl.toString());
+            } else {
+              // Normal API login → JSON response
+              return res.json({
+                message: "Success",
+                token,
+                sessionId,
+                user: { id: userId, name, email, is_admin: isAdmin },
+              });
+            }
+          }
+        );
       }
     );
   } catch (err) {
@@ -212,7 +232,6 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
     return res.status(500).json({ message: "Failed to issue token" });
   }
 }
-
 
 // ---------- Google OAuth routes ----------
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
@@ -233,37 +252,32 @@ app.get(
           return res.status(500).json({ message: "Database error" });
         }
 
-        let userId, userName, isAdmin;
-
         if (!row) {
+          // create user then issue token with activityType 'register'
           const safeName = nameFromGoogle || email.split("@")[0];
           const randomPassword = crypto.randomBytes(16).toString("hex");
           const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
-          await new Promise((resolve, reject) => {
-            db.run(
-              "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
-              [safeName, email, null, hashedPassword],
-              function (err2) {
-                if (err2) return reject(err2);
-                userId = this.lastID;
-                userName = safeName;
-                isAdmin = 0;
-                resolve();
+          db.run(
+            "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
+            [safeName, email, null, hashedPassword],
+            function (insertErr) {
+              if (insertErr) {
+                console.error("Insert user error:", insertErr);
+                return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
               }
-            );
-          }).catch((err2) => {
-            console.error("Insert user error:", err2);
-            return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
-          });
+              const newUserId = this.lastID;
+              // issue token and record activity as 'register'
+              return issueTokenAndRespond(req, res, newUserId, email, safeName, 0, true, "register");
+            }
+          );
         } else {
-          userId = row.id;
-          userName = row.name || nameFromGoogle;
-          isAdmin = Number(row.is_admin) || 0;
+          // existing user: login, activityType 'login'
+          const userId = row.id;
+          const userName = row.name || nameFromGoogle;
+          const isAdmin = Number(row.is_admin) || 0;
+          return issueTokenAndRespond(req, res, userId, email, userName, isAdmin, true, "login");
         }
-
-        // Issue token, create session and redirect (issueTokenAndRespond sets cookies)
-        return issueTokenAndRespond(req, res, userId, email, userName, isAdmin, true);
       });
     } catch (err) {
       console.error("Google callback error:", err);
@@ -284,11 +298,12 @@ app.post("/api/register", async (req, res) => {
       [name, email, phone, hashedPassword],
       function (err) {
         if (err) {
-          if (err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
-          console.error("Register insert error:", err.message);
-          return res.status(500).json({ message: err.message });
+          if (err.message && err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
+          console.error("Register insert error:", err.message || err);
+          return res.status(500).json({ message: err.message || "Failed to register" });
         }
-        return issueTokenAndRespond(req, res, this.lastID, email, name, 0, false);
+        // Inserted new user: issue token and record activityType 'register'
+        return issueTokenAndRespond(req, res, this.lastID, email, name, 0, false, "register");
       }
     );
   } catch (error) {
@@ -309,7 +324,8 @@ app.post("/api/login", (req, res) => {
     const isMatch = await bcrypt.compare(password, row.password);
     if (!isMatch) return res.status(401).json({ message: "Invalid password" });
 
-    return issueTokenAndRespond(req, res, row.id, row.email, row.name, row.is_admin, false);
+    // Successful login: record activityType 'login'
+    return issueTokenAndRespond(req, res, row.id, row.email, row.name, row.is_admin, false, "login");
   });
 });
 
@@ -338,31 +354,44 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
 });
 
 // ---------- Sign out session route ----------
+// Records a 'logout' activity (best-effort) then removes session and clears cookies
 app.post("/api/account/signout-session", authenticateToken, (req, res) => {
   const sessionId = req.body?.sessionId || req.cookies?.sessionId || req.sessionId;
   const userId = Number(req.user?.id);
 
   if (!userId) return res.status(401).json({ message: "Not authenticated" });
 
-  // If sessionId provided, delete that session only (and ensure ownership).
-  // If not provided, delete all sessions for the user (optional behavior).
-  const stmt = sessionId
-    ? "DELETE FROM user_sessions WHERE id = ? AND user_id = ?"
-    : "DELETE FROM user_sessions WHERE user_id = ?";
-  const params = sessionId ? [sessionId, userId] : [userId];
+  const device = getDevice(req);
+  const ip = getIP(req);
+  const createdAt = new Date().toISOString();
 
-  db.run(stmt, params, function (err) {
-    if (err) {
-      console.error("Failed to remove session:", err);
-      return res.status(500).json({ message: "Failed to remove session" });
+  // Insert logout activity first (best-effort)
+  db.run(
+    "INSERT INTO user_activity (user_id, session_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [userId, sessionId || null, "logout", device, ip, createdAt],
+    function (actErr) {
+      if (actErr) console.warn("Failed to insert logout activity:", actErr.message);
+
+      // Now delete session(s)
+      const stmt = sessionId
+        ? "DELETE FROM user_sessions WHERE id = ? AND user_id = ?"
+        : "DELETE FROM user_sessions WHERE user_id = ?";
+      const params = sessionId ? [sessionId, userId] : [userId];
+
+      db.run(stmt, params, function (err) {
+        if (err) {
+          console.error("Failed to remove session:", err);
+          return res.status(500).json({ message: "Failed to remove session" });
+        }
+
+        // Clear auth cookies (client-side httpOnly cookies)
+        res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
+        res.clearCookie("sessionId", { ...AUTH_COOKIE_OPTIONS });
+
+        return res.json({ success: true, removed: this.changes });
+      });
     }
-
-    // Clear auth cookies
-    res.clearCookie("token", { ...AUTH_COOKIE_OPTIONS });
-    res.clearCookie("sessionId", { ...AUTH_COOKIE_OPTIONS });
-
-    return res.json({ success: true, removed: this.changes });
-  });
+  );
 });
 
 // ---------- Get User Profile ----------
@@ -450,5 +479,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 export { app, db };
-
-
