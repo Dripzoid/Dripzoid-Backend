@@ -456,83 +456,64 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
  * POST /api/account/signout-session
  * Body: { sessionId?: number|null }
  *
- * This endpoint attempts to:
- *  - Parse token (Authorization header or cookie) to determine user id (optional).
- *  - Accept sessionId in body or cookie to delete session row in DB.
- *  - Clear token and sessionId cookies in response (so browser forgets them).
- *
- * Always returns { success: true } in typical flows (even if session not found).
+ * This endpoint:
+ *  - Deletes session row from DB (if sessionId provided).
+ *  - Clears token & sessionId cookies.
+ *  - Always returns { success: true }.
  */
 app.post("/api/account/signout-session", async (req, res) => {
   try {
     const providedSessionId = req.body?.sessionId ?? req.cookies?.sessionId ?? null;
 
-    // Try extract user id if token present
-    let token = null;
-    const authHeader = req.headers["authorization"];
-    if (authHeader && typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")) {
-      token = authHeader.split(" ")[1];
-    } else if (req.cookies?.token) {
-      token = req.cookies.token;
-    }
-
+    // Extract userId from token if available
     let userId = null;
+    let token = req.headers["authorization"]?.toLowerCase()?.startsWith("bearer ")
+      ? req.headers["authorization"].split(" ")[1]
+      : req.cookies?.token;
+
     if (token) {
       try {
         const payload = jwt.verify(token, JWT_SECRET);
         userId = payload?.id ? Number(payload.id) : null;
       } catch (err) {
-        // token might be invalid/expired; we'll still clear cookies
-        console.warn("signout-session: provided token invalid/expired", err?.message);
-        userId = null;
+        console.warn("signout-session: token invalid/expired", err?.message);
       }
     }
 
-    // If a session id is provided, attempt to delete it from DB
+    // Delete session from DB (best-effort)
     if (providedSessionId != null) {
       const sid = Number(providedSessionId);
-      // If we have userId, only delete session for that user
       if (userId) {
         db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [sid, userId], function (delErr) {
           if (delErr) console.warn("signout-session: db delete error (user-scoped):", delErr.message);
           else console.log("signout-session: removed session", sid, "for user", userId);
         });
       } else {
-        // no userId: still try to delete by id (best-effort)
         db.run("DELETE FROM user_sessions WHERE id = ?", [sid], function (delErr) {
           if (delErr) console.warn("signout-session: db delete error (id-only):", delErr.message);
           else console.log("signout-session: removed session", sid);
         });
       }
-    } else if (userId) {
-      // no sessionId provided but we have userId -> optionally delete all sessions for that user if desired
-      // We'll not delete all by default. Could delete current session by finding last inserted? skip.
-      console.log("signout-session: no sessionId provided, userId present:", userId);
-    } else {
-      console.log("signout-session: no sessionId or usable token provided; will still clear cookies");
     }
 
-    // Clear cookies
-    try {
-      const cookieOpts = {
-        path: AUTH_COOKIE_OPTIONS.path,
-        httpOnly: AUTH_COOKIE_OPTIONS.httpOnly,
-        sameSite: AUTH_COOKIE_OPTIONS.sameSite,
-        secure: AUTH_COOKIE_OPTIONS.secure,
-      };
-      res.clearCookie("token", cookieOpts);
-      res.clearCookie("sessionId", cookieOpts);
-      // If you used other cookie names for sessions, clear them here too.
-    } catch (err) {
-      console.warn("signout-session: failed to clear cookies", err);
-    }
+    // Clear cookies immediately
+    const cookieOpts = {
+      path: AUTH_COOKIE_OPTIONS.path,
+      httpOnly: AUTH_COOKIE_OPTIONS.httpOnly,
+      sameSite: AUTH_COOKIE_OPTIONS.sameSite,
+      secure: AUTH_COOKIE_OPTIONS.secure,
+    };
+    res.clearCookie("token", cookieOpts);
+    res.clearCookie("sessionId", cookieOpts);
 
+    // Return success only after cookies cleared
     return res.json({ success: true });
   } catch (err) {
     console.error("signout-session error:", err);
     return res.status(500).json({ success: false, error: "signout failed" });
   }
 });
+
 
 // -------------------- Root + health routes --------------------
 app.get("/", (req, res) => {
@@ -594,3 +575,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
