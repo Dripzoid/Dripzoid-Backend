@@ -214,33 +214,6 @@ router.post("/notifications", auth, (req, res) => {
   });
 });
 
-// ---------- Sign out session ----------
-// Wait for both delete and activity insert before responding
-router.post("/signout-session", auth, (req, res) => {
-  const userId = req.user?.id;
-  const { sessionId } = req.body;
-  if (!userId) return res.status(401).json({ error: "Missing user id in token" });
-  if (!sessionId) return res.status(400).json({ error: "Session ID required" });
-
-  db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [sessionId, userId], function (err) {
-    if (err) {
-      console.error("DB error deleting session:", err.message);
-      return res.status(500).json({ error: "Failed to sign out", details: err.message });
-    }
-
-    // Once deleted, insert activity and respond after activity insert completes
-    db.run("INSERT INTO user_activity (user_id, action) VALUES (?, ?)", [userId, "Logged out"], (err2) => {
-      if (err2) {
-        console.error("Failed to log activity (logout):", err2.message);
-        // Respond with success for deletion but include detail about activity logging failure
-        return res.status(200).json({ success: true, message: "Session removed, but failed to log activity", details: err2.message });
-      }
-
-      return res.json({ success: true, message: "Logged out successfully" });
-    });
-  });
-});
-
 // ---------- Export account data ----------
 router.get("/export", auth, (req, res) => {
   const userId = req.user?.id;
@@ -310,5 +283,6 @@ router.delete("/delete", auth, (req, res) => {
 });
 
 export default router;
+
 
 
