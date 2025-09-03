@@ -284,21 +284,13 @@ app.get(
   async (req, res) => {
     try {
       const email = req.user?.email?.toLowerCase();
-      const nameFromGoogle = (req.user?.name || "").trim();
-      if (!email) {
-        console.warn("Google callback: missing email");
-        return res.redirect(`${CLIENT_URL}/login?error=no_email`);
-      }
+      if (!email) return res.redirect(`${CLIENT_URL}/login?error=no_email`);
 
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-        if (err) {
-          console.error("Google callback DB error:", err.message || err);
-          return res.redirect(`${CLIENT_URL}/login?error=db_error`);
-        }
+        if (err) return res.redirect(`${CLIENT_URL}/login?error=db_error`);
 
         if (!row) {
-          // create user with random password
-          const safeName = nameFromGoogle || email.split("@")[0];
+          const safeName = req.user.name || email.split("@")[0];
           const randomPassword = crypto.randomBytes(16).toString("hex");
           const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
@@ -306,17 +298,18 @@ app.get(
             "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
             [safeName, email, null, hashedPassword],
             function (insertErr) {
-              if (insertErr) {
-                console.error("Google callback insert error:", insertErr.message || insertErr);
-                return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
-              }
-              const newUserRow = { id: this.lastID, name: safeName, email, is_admin: 0 };
-              return issueTokenAndRespond(req, res, newUserRow, { isOAuth: true, activityType: "register" });
+              if (insertErr) return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
+
+              // ✅ Issue token for newly created user
+              db.get("SELECT * FROM users WHERE id = ?", [this.lastID], (err2, userRow) => {
+                if (err2 || !userRow) return res.redirect(`${CLIENT_URL}/login?error=db_fetch_failed`);
+                return issueToken(req, res, { ...userRow, is_admin: Number(userRow.is_admin) });
+              });
             }
           );
         } else {
-          const userRow = { ...row, is_admin: Number(row.is_admin) || 0 };
-          return issueTokenAndRespond(req, res, userRow, { isOAuth: true, activityType: "login" });
+          // ✅ Issue token for existing user
+          return issueToken(req, res, { ...row, is_admin: Number(row.is_admin) });
         }
       });
     } catch (err) {
@@ -325,6 +318,7 @@ app.get(
     }
   }
 );
+
 
 // Register (API flow) -> returns JSON with token/sessionId
 app.post("/api/register", async (req, res) => {
@@ -492,4 +486,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
