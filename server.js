@@ -248,6 +248,7 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
           try {
             res.cookie("token", token, AUTH_COOKIE_OPTIONS);
             res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
+            console.log("issueTokenAndRespond: set cookies for user", id, "sessionId", sessionId);
           } catch (cookieErr) {
             console.warn("issueTokenAndRespond: failed to set cookies:", cookieErr);
           }
@@ -277,19 +278,27 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
 // Google OAuth entry
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
-// Google OAuth callback: we create or find user and then call issueTokenAndRespond with isOAuth=true
+// Google OAuth callback: create/find user and then call issueTokenAndRespond with isOAuth=true
 app.get(
   "/api/auth/google/callback",
   passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   async (req, res) => {
     try {
+      console.log("Google callback invoked, profile:", !!req.user, req.user?.email);
       const email = req.user?.email?.toLowerCase();
-      if (!email) return res.redirect(`${CLIENT_URL}/login?error=no_email`);
+      if (!email) {
+        console.warn("Google callback: no email in profile");
+        return res.redirect(`${CLIENT_URL}/login?error=no_email`);
+      }
 
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-        if (err) return res.redirect(`${CLIENT_URL}/login?error=db_error`);
+        if (err) {
+          console.error("Google callback DB get error:", err);
+          return res.redirect(`${CLIENT_URL}/login?error=db_error`);
+        }
 
         if (!row) {
+          // create user
           const safeName = req.user.name || email.split("@")[0];
           const randomPassword = crypto.randomBytes(16).toString("hex");
           const hashedPassword = await bcrypt.hash(randomPassword, 10);
@@ -298,18 +307,26 @@ app.get(
             "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
             [safeName, email, null, hashedPassword],
             function (insertErr) {
-              if (insertErr) return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
+              if (insertErr) {
+                console.error("Google callback: insert user error:", insertErr);
+                return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
+              }
 
-              // ✅ Issue token for newly created user
+              // fetch created user and issue token / cookies
               db.get("SELECT * FROM users WHERE id = ?", [this.lastID], (err2, userRow) => {
-                if (err2 || !userRow) return res.redirect(`${CLIENT_URL}/login?error=db_fetch_failed`);
-                return issueToken(req, res, { ...userRow, is_admin: Number(userRow.is_admin) });
+                if (err2 || !userRow) {
+                  console.error("Google callback: unable to fetch created user:", err2);
+                  return res.redirect(`${CLIENT_URL}/login?error=db_fetch_failed`);
+                }
+                console.log("Google callback: created new user id=", userRow.id);
+                return issueTokenAndRespond(req, res, { ...userRow, is_admin: Number(userRow.is_admin) }, { isOAuth: true, activityType: "register" });
               });
             }
           );
         } else {
-          // ✅ Issue token for existing user
-          return issueToken(req, res, { ...row, is_admin: Number(row.is_admin) });
+          // existing user -> issue cookies and redirect
+          console.log("Google callback: existing user id=", row.id);
+          return issueTokenAndRespond(req, res, { ...row, is_admin: Number(row.is_admin) }, { isOAuth: true, activityType: "login" });
         }
       });
     } catch (err) {
@@ -318,7 +335,6 @@ app.get(
     }
   }
 );
-
 
 // Register (API flow) -> returns JSON with token/sessionId
 app.post("/api/register", async (req, res) => {
@@ -486,5 +502,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
-
-
