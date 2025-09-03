@@ -14,6 +14,8 @@ import { v2 as cloudinary } from "cloudinary";
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { UAParser } from "ua-parser-js";
+
+// Middleware
 import cookieParser from "cookie-parser";
 
 // Import routes
@@ -46,12 +48,10 @@ const app = express();
 
 // ----------- Middleware -----------
 
-// Trust proxy if behind load balancer
 if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
   app.set("trust proxy", 1);
 }
 
-// CORS
 app.use(
   cors({
     origin: CLIENT_URL,
@@ -60,7 +60,7 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
-app.options("*", cors()); // handle preflight
+app.options("*", cors());
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -140,15 +140,6 @@ function getIP(req) {
   return req.ip || req.socket?.remoteAddress || "Unknown IP";
 }
 
-const TOKEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 180; // 180 days
-const AUTH_COOKIE_OPTIONS = {
-  httpOnly: true,
-  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-  secure: process.env.NODE_ENV === "production",
-  path: "/",
-  maxAge: TOKEN_MAX_AGE_MS,
-};
-
 // ----------- JWT Middleware -----------
 
 function authenticateToken(req, res, next) {
@@ -156,7 +147,6 @@ function authenticateToken(req, res, next) {
     let token = null;
     const authHeader = req.headers["authorization"];
     if (authHeader?.toLowerCase().startsWith("bearer ")) token = authHeader.split(" ")[1];
-    else if (req.cookies?.token) token = req.cookies.token;
 
     if (!token) return res.status(401).json({ message: "No token provided" });
 
@@ -197,40 +187,34 @@ passport.use(
 
 // ----------- Token Issuance -----------
 
-function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
-  try {
-    const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
+function issueToken(req, res, userRow, activityType = "login") {
+  const { id, email, name, is_admin } = userRow;
+  const token = jwt.sign({ id, email, is_admin }, JWT_SECRET, { expiresIn: "180d" });
 
-    const device = getDevice(req);
-    const ip = getIP(req);
-    const now = new Date().toISOString();
+  const device = getDevice(req);
+  const ip = getIP(req);
+  const now = new Date().toISOString();
 
-    db.run(
-      "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-      [userId, device, ip, now],
-      function (err2) {
-        if (err2) return res.status(500).json({ message: "Failed to create session" });
+  db.run(
+    "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+    [id, device, ip, now],
+    function (err2) {
+      if (err2) return res.status(500).json({ message: "Failed to create session" });
 
-        const sessionId = this.lastID;
+      const sessionId = this.lastID;
 
-        // Log activity
-        db.run(
-          "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
-          [userId, activityType, device, ip, now]
-        );
+      db.run(
+        "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
+        [id, activityType, device, ip, now]
+      );
 
-        // Set cookies
-        res.cookie("token", token, AUTH_COOKIE_OPTIONS);
-        res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
-
-        // Redirect to frontend
-        return res.redirect(`${CLIENT_URL}/account`);
-      }
-    );
-  } catch (err) {
-    console.error("Token issuance failed:", err);
-    return res.status(500).json({ message: "Failed to issue token" });
-  }
+      return res.json({
+        user: { id, name, email, is_admin },
+        token,
+        sessionId,
+      });
+    }
+  );
 }
 
 // ----------- Auth Routes -----------
@@ -259,11 +243,11 @@ app.get(
             [safeName, email, null, hashedPassword],
             function (insertErr) {
               if (insertErr) return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
-              return issueTokenAndRespond(req, res, this.lastID, email, safeName);
+              return issueToken(req, res, { id: this.lastID, name: safeName, email, is_admin: 0 });
             }
           );
         } else {
-          return issueTokenAndRespond(req, res, row.id, email, row.name || req.user.name, Number(row.is_admin));
+          return issueToken(req, res, { ...row, is_admin: Number(row.is_admin) });
         }
       });
     } catch (err) {
@@ -289,7 +273,11 @@ app.post("/api/register", async (req, res) => {
           if (err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
           return res.status(500).json({ message: err.message || "Failed to register" });
         }
-        return issueTokenAndRespond(req, res, this.lastID, normalizedEmail, name, 0, false, "register");
+
+        db.get("SELECT * FROM users WHERE id = ?", [this.lastID], (err2, userRow) => {
+          if (err2 || !userRow) return res.status(500).json({ message: "DB error" });
+          return issueToken(req, res, userRow, "register");
+        });
       }
     );
   } catch (error) {
@@ -309,7 +297,7 @@ app.post("/api/login", (req, res) => {
     const isMatch = await bcrypt.compare(password, row.password);
     if (!isMatch) return res.status(401).json({ message: "Invalid password" });
 
-    return issueTokenAndRespond(req, res, row.id, row.email, row.name, Number(row.is_admin), false, "login");
+    return issueToken(req, res, { ...row, is_admin: Number(row.is_admin) }, "login");
   });
 });
 
@@ -320,11 +308,8 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
 
   db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, userRow) => {
     if (err || !userRow) return res.status(500).json({ message: "DB error or user not found" });
-
     const token = jwt.sign({ id: userRow.id, email: userRow.email, is_admin: userRow.is_admin }, JWT_SECRET, { expiresIn: "180d" });
-    res.cookie("token", token, AUTH_COOKIE_OPTIONS);
-
-    res.json({ user: userRow });
+    res.json({ user: userRow, token });
   });
 });
 
