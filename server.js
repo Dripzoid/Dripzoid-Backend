@@ -159,7 +159,7 @@ function authenticateToken(req, res, next) {
     if (!token && req.cookies?.token) token = req.cookies.token;
 
     if (!token) {
-      console.warn("authenticateToken: no token provided for", req.method, req.originalUrl);
+      // No token — caller may be unauthenticated; return 401 so callers know
       return res.status(401).json({ message: "No token provided" });
     }
 
@@ -319,7 +319,12 @@ app.get(
                   return res.redirect(`${CLIENT_URL}/login?error=db_fetch_failed`);
                 }
                 console.log("Google callback: created new user id=", userRow.id);
-                return issueTokenAndRespond(req, res, { ...userRow, is_admin: Number(userRow.is_admin) }, { isOAuth: true, activityType: "register" });
+                return issueTokenAndRespond(
+                  req,
+                  res,
+                  { ...userRow, is_admin: Number(userRow.is_admin) },
+                  { isOAuth: true, activityType: "register" }
+                );
               });
             }
           );
@@ -398,7 +403,7 @@ app.post("/api/login", (req, res) => {
 });
 
 // /api/auth/me - allow cookie-based or Authorization header token
-// IMPORTANT: This endpoint now returns token in JSON so frontend can store it in localStorage if desired.
+// IMPORTANT: This endpoint returns token in JSON so frontend can store it in localStorage if desired.
 app.get("/api/auth/me", authenticateToken, (req, res) => {
   try {
     const userId = Number(req.user?.id);
@@ -443,6 +448,89 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
   } catch (err) {
     console.error("/api/auth/me error:", err);
     return res.status(500).json({ message: "Internal error" });
+  }
+});
+
+// -------------------- Sign out route --------------------
+/**
+ * POST /api/account/signout-session
+ * Body: { sessionId?: number|null }
+ *
+ * This endpoint attempts to:
+ *  - Parse token (Authorization header or cookie) to determine user id (optional).
+ *  - Accept sessionId in body or cookie to delete session row in DB.
+ *  - Clear token and sessionId cookies in response (so browser forgets them).
+ *
+ * Always returns { success: true } in typical flows (even if session not found).
+ */
+app.post("/api/account/signout-session", async (req, res) => {
+  try {
+    const providedSessionId = req.body?.sessionId ?? req.cookies?.sessionId ?? null;
+
+    // Try extract user id if token present
+    let token = null;
+    const authHeader = req.headers["authorization"];
+    if (authHeader && typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")) {
+      token = authHeader.split(" ")[1];
+    } else if (req.cookies?.token) {
+      token = req.cookies.token;
+    }
+
+    let userId = null;
+    if (token) {
+      try {
+        const payload = jwt.verify(token, JWT_SECRET);
+        userId = payload?.id ? Number(payload.id) : null;
+      } catch (err) {
+        // token might be invalid/expired; we'll still clear cookies
+        console.warn("signout-session: provided token invalid/expired", err?.message);
+        userId = null;
+      }
+    }
+
+    // If a session id is provided, attempt to delete it from DB
+    if (providedSessionId != null) {
+      const sid = Number(providedSessionId);
+      // If we have userId, only delete session for that user
+      if (userId) {
+        db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [sid, userId], function (delErr) {
+          if (delErr) console.warn("signout-session: db delete error (user-scoped):", delErr.message);
+          else console.log("signout-session: removed session", sid, "for user", userId);
+        });
+      } else {
+        // no userId: still try to delete by id (best-effort)
+        db.run("DELETE FROM user_sessions WHERE id = ?", [sid], function (delErr) {
+          if (delErr) console.warn("signout-session: db delete error (id-only):", delErr.message);
+          else console.log("signout-session: removed session", sid);
+        });
+      }
+    } else if (userId) {
+      // no sessionId provided but we have userId -> optionally delete all sessions for that user if desired
+      // We'll not delete all by default. Could delete current session by finding last inserted? skip.
+      console.log("signout-session: no sessionId provided, userId present:", userId);
+    } else {
+      console.log("signout-session: no sessionId or usable token provided; will still clear cookies");
+    }
+
+    // Clear cookies
+    try {
+      const cookieOpts = {
+        path: AUTH_COOKIE_OPTIONS.path,
+        httpOnly: AUTH_COOKIE_OPTIONS.httpOnly,
+        sameSite: AUTH_COOKIE_OPTIONS.sameSite,
+        secure: AUTH_COOKIE_OPTIONS.secure,
+      };
+      res.clearCookie("token", cookieOpts);
+      res.clearCookie("sessionId", cookieOpts);
+      // If you used other cookie names for sessions, clear them here too.
+    } catch (err) {
+      console.warn("signout-session: failed to clear cookies", err);
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("signout-session error:", err);
+    return res.status(500).json({ success: false, error: "signout failed" });
   }
 });
 
