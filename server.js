@@ -16,6 +16,7 @@ import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { UAParser } from "ua-parser-js";
 import cookieParser from "cookie-parser";
 
+// Import routes
 import wishlistRoutes from "./wishlist.js";
 import productsRouter from "./products.js";
 import cartRouter from "./cart.js";
@@ -39,12 +40,11 @@ const __dirname = path.dirname(__filename);
 
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 const API_BASE = process.env.API_BASE || "http://localhost:5000";
-if (!process.env.JWT_SECRET && process.env.NODE_ENV === "production") {
-  console.error("❌ JWT_SECRET not set in production!");
-}
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 const app = express();
+
+// ----------- Middleware -----------
 
 // Trust proxy if behind load balancer
 if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
@@ -56,28 +56,27 @@ app.use(
   cors({
     origin: CLIENT_URL,
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+app.options("*", cors()); // handle preflight
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Cloudinary config (optional)
-if (
-  process.env.CLOUDINARY_CLOUD_NAME &&
-  process.env.CLOUDINARY_API_KEY &&
-  process.env.CLOUDINARY_API_SECRET
-) {
+// Cloudinary (optional)
+if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET,
   });
-} else {
-  console.warn("⚠️ Cloudinary env vars not fully set.");
 }
 
-// SQLite DB
+// ----------- Database -----------
+
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data/dripzoid.db");
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) console.error("❌ SQLite connection error:", err.message);
@@ -87,8 +86,8 @@ app.locals.db = db;
 
 // Create tables if missing
 db.serialize(() => {
-  db.run(
-    `CREATE TABLE IF NOT EXISTS users (
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT,
       email TEXT NOT NULL UNIQUE,
@@ -96,21 +95,21 @@ db.serialize(() => {
       password TEXT NOT NULL,
       is_admin INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now', 'localtime'))
-    )`
-  );
+    )
+  `);
 
-  db.run(
-    `CREATE TABLE IF NOT EXISTS user_sessions (
+  db.run(`
+    CREATE TABLE IF NOT EXISTS user_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       device TEXT,
       ip TEXT,
       last_active TEXT
-    )`
-  );
+    )
+  `);
 
-  db.run(
-    `CREATE TABLE IF NOT EXISTS user_activity (
+  db.run(`
+    CREATE TABLE IF NOT EXISTS user_activity (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       type TEXT,
@@ -118,11 +117,12 @@ db.serialize(() => {
       ip TEXT,
       created_at TEXT DEFAULT (datetime('now', 'localtime')),
       FOREIGN KEY(user_id) REFERENCES users(id)
-    )`
-  );
+    )
+  `);
 });
 
 // ----------- Helpers -----------
+
 function getDevice(req) {
   try {
     const parser = new UAParser(req.headers["user-agent"]);
@@ -141,21 +141,23 @@ function getIP(req) {
 }
 
 const TOKEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 180; // 180 days
-
 const AUTH_COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
   secure: process.env.NODE_ENV === "production",
   path: "/",
+  maxAge: TOKEN_MAX_AGE_MS,
 };
 
-// JWT middleware
+// ----------- JWT Middleware -----------
+
 function authenticateToken(req, res, next) {
   try {
     let token = null;
     const authHeader = req.headers["authorization"];
-    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) token = authHeader.split(" ")[1];
-    if (!token && req.cookies && req.cookies.token) token = req.cookies.token;
+    if (authHeader?.toLowerCase().startsWith("bearer ")) token = authHeader.split(" ")[1];
+    else if (req.cookies?.token) token = req.cookies.token;
+
     if (!token) return res.status(401).json({ message: "No token provided" });
 
     jwt.verify(token, JWT_SECRET, (err, payload) => {
@@ -169,7 +171,8 @@ function authenticateToken(req, res, next) {
   }
 }
 
-// ----------- Passport (Google OAuth) -----------
+// ----------- Passport Google OAuth -----------
+
 app.use(passport.initialize());
 
 passport.use(
@@ -192,38 +195,35 @@ passport.use(
   )
 );
 
-// ----------- Token issuance ----------
+// ----------- Token Issuance -----------
+
 function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
   try {
-    const normalizedEmail = typeof email === "string" ? email.toLowerCase() : "";
-    const token = jwt.sign({ id: userId, email: normalizedEmail, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
+    const token = jwt.sign({ id: userId, email, is_admin: isAdmin }, JWT_SECRET, { expiresIn: "180d" });
 
     const device = getDevice(req);
     const ip = getIP(req);
-    const lastActive = new Date().toISOString();
+    const now = new Date().toISOString();
 
     db.run(
       "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-      [userId, device, ip, lastActive],
+      [userId, device, ip, now],
       function (err2) {
-        if (err2) {
-          console.error("Failed to insert session:", err2.message);
-          return res.status(500).json({ message: "Failed to create session" });
-        }
+        if (err2) return res.status(500).json({ message: "Failed to create session" });
 
         const sessionId = this.lastID;
 
         // Log activity
         db.run(
           "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
-          [userId, activityType, device, ip, lastActive]
+          [userId, activityType, device, ip, now]
         );
 
         // Set cookies
-        res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
-        res.cookie("sessionId", String(sessionId), { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
+        res.cookie("token", token, AUTH_COOKIE_OPTIONS);
+        res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
 
-        // Redirect to /account instead of sending token in URL
+        // Redirect to frontend
         return res.redirect(`${CLIENT_URL}/account`);
       }
     );
@@ -235,26 +235,22 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
 
 // ----------- Auth Routes -----------
 
-// Google OAuth entry
+// Google OAuth
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
-// Google OAuth callback
 app.get(
   "/api/auth/google/callback",
   passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   async (req, res) => {
     try {
-      const emailRaw = req.user?.email;
-      const email = typeof emailRaw === "string" ? emailRaw.toLowerCase() : null;
-      const nameFromGoogle = (req.user?.name || "").trim();
+      const email = req.user?.email?.toLowerCase();
       if (!email) return res.redirect(`${CLIENT_URL}/login?error=no_email`);
 
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
         if (err) return res.redirect(`${CLIENT_URL}/login?error=db_error`);
 
         if (!row) {
-          // create new user
-          const safeName = nameFromGoogle || email.split("@")[0];
+          const safeName = req.user.name || email.split("@")[0];
           const randomPassword = crypto.randomBytes(16).toString("hex");
           const hashedPassword = await bcrypt.hash(randomPassword, 10);
 
@@ -263,12 +259,11 @@ app.get(
             [safeName, email, null, hashedPassword],
             function (insertErr) {
               if (insertErr) return res.redirect(`${CLIENT_URL}/login?error=user_create_failed`);
-              return issueTokenAndRespond(req, res, this.lastID, email, safeName, 0, true, "register");
+              return issueTokenAndRespond(req, res, this.lastID, email, safeName);
             }
           );
         } else {
-          // existing user
-          return issueTokenAndRespond(req, res, row.id, email, row.name || nameFromGoogle, Number(row.is_admin), true, "login");
+          return issueTokenAndRespond(req, res, row.id, email, row.name || req.user.name, Number(row.is_admin));
         }
       });
     } catch (err) {
@@ -291,7 +286,7 @@ app.post("/api/register", async (req, res) => {
       [name, normalizedEmail, phone, hashedPassword],
       function (err) {
         if (err) {
-          if (err.message && err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
+          if (err.message.includes("UNIQUE constraint failed")) return res.status(400).json({ message: "Email already exists" });
           return res.status(500).json({ message: err.message || "Failed to register" });
         }
         return issueTokenAndRespond(req, res, this.lastID, normalizedEmail, name, 0, false, "register");
@@ -305,7 +300,7 @@ app.post("/api/register", async (req, res) => {
 // Login
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
-  const normalizedEmail = typeof email === "string" ? email.toLowerCase() : "";
+  const normalizedEmail = email.toLowerCase();
 
   db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
     if (err) return res.status(500).json({ message: err.message });
@@ -318,46 +313,23 @@ app.post("/api/login", (req, res) => {
   });
 });
 
-// ----------- /api/auth/me -----------
+// /api/auth/me
 app.get("/api/auth/me", authenticateToken, (req, res) => {
   const userId = Number(req.user?.id);
   if (!userId) return res.status(401).json({ message: "Not authenticated" });
 
-  const cookieSessionId = req.cookies?.sessionId;
-  const device = getDevice(req);
-  const ip = getIP(req);
-  const now = new Date().toISOString();
+  db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, userRow) => {
+    if (err || !userRow) return res.status(500).json({ message: "DB error or user not found" });
 
-  const returnUserAndSession = (sessionId) => {
-    db.run("UPDATE user_sessions SET last_active = ? WHERE id = ?", [now, sessionId]);
+    const token = jwt.sign({ id: userRow.id, email: userRow.email, is_admin: userRow.is_admin }, JWT_SECRET, { expiresIn: "180d" });
+    res.cookie("token", token, AUTH_COOKIE_OPTIONS);
 
-    db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, userRow) => {
-      if (err || !userRow) return res.status(500).json({ message: "DB error or user not found" });
-
-      const token = jwt.sign({ id: userRow.id, email: userRow.email, is_admin: userRow.is_admin }, JWT_SECRET, { expiresIn: "180d" });
-      res.cookie("token", token, { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
-
-      res.json({ message: "Session valid", user: userRow, sessionId });
-    });
-  };
-
-  if (cookieSessionId) {
-    db.get("SELECT * FROM user_sessions WHERE id = ? AND user_id = ?", [cookieSessionId, userId], (err, row) => {
-      if (row) return returnUserAndSession(cookieSessionId);
-      db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, now], function () {
-        res.cookie("sessionId", String(this.lastID), { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
-        return returnUserAndSession(this.lastID);
-      });
-    });
-  } else {
-    db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, now], function () {
-      res.cookie("sessionId", String(this.lastID), { ...AUTH_COOKIE_OPTIONS, maxAge: TOKEN_MAX_AGE_MS });
-      return returnUserAndSession(this.lastID);
-    });
-  }
+    res.json({ user: userRow });
+  });
 });
 
 // ----------- Mount other routes -----------
+
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/products", productsRouter);
 app.use("/api/cart", cartRouter);
