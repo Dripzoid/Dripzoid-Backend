@@ -195,7 +195,7 @@ passport.use(
  * - creates a user_sessions row (DB-persistent)
  * - logs an entry in user_activity (no session_id)
  * - sets httpOnly cookies for token + sessionId
- * - for isOAuth -> redirect to client /account (frontend should call /api/auth/me to hydrate)
+ * - for isOAuth -> redirect to client with token, sessionId and name as query params
  * - for non-OAuth -> return JSON { message, token, sessionId, user }
  */
 function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, isOAuth = false, activityType = "login") {
@@ -240,9 +240,21 @@ function issueTokenAndRespond(req, res, userId, email, name = "", isAdmin = 0, i
           console.warn("Failed to set auth cookies:", cookieErr);
         }
 
-        // OAuth flow: redirect to client /account (frontend should call /api/auth/me to hydrate)
+        // OAuth flow: redirect to client with token & sessionId & name in query so frontend (Auth.jsx) can read them
         if (isOAuth) {
-          return res.redirect(new URL("/account", CLIENT_URL).toString());
+          try {
+            const redirectUrl = new URL(CLIENT_URL);
+            // Attach token, sessionId and name as query params so frontend can pick them up from window.location.search
+            redirectUrl.searchParams.set("token", token);
+            redirectUrl.searchParams.set("sessionId", String(sessionId));
+            if (name) redirectUrl.searchParams.set("name", name);
+            // Optionally direct user to /account on client; frontend will read params and then navigate to /account
+            redirectUrl.pathname = "/"; // keep at root; frontend Auth will cleanup and navigate
+            return res.redirect(redirectUrl.toString());
+          } catch (redirErr) {
+            console.error("Failed to build redirect URL for OAuth:", redirErr);
+            return res.redirect(`${CLIENT_URL}/login?error=redirect_failed`);
+          }
         }
 
         // Non-OAuth: return JSON with token, sessionId and user (including phone)
