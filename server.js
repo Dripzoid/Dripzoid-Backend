@@ -77,7 +77,7 @@ app.use((req, res, next) => {
 });
 
 // -------------------- DB init --------------------
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data/dripzoid.db");
+const DB_PATH = process.env.DATABASE_FILE || path.join(__dirname, "./dripzoid.db");
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) console.error("❌ SQLite connection error:", err.message);
   else console.log("✅ Connected to SQLite database at", DB_PATH);
@@ -492,3 +492,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
