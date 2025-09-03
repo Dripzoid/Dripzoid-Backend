@@ -54,11 +54,11 @@ app.use(
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
-    exposedHeaders: ["Content-Length", "X-Kuma-Revision"],
+    exposedHeaders: ["Content-Length"],
   })
 );
 
-// preflight
+// preflight handler
 app.options("*", cors());
 
 app.use(express.json());
@@ -138,7 +138,7 @@ function getIP(req) {
   return req.ip || req.socket?.remoteAddress || "Unknown IP";
 }
 
-const TOKEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 180;
+const TOKEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 180; // 180 days
 const AUTH_COOKIE_OPTIONS = {
   httpOnly: true,
   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
@@ -205,8 +205,8 @@ passport.use(
  * issueTokenAndRespond:
  *  - Creates a user_sessions row
  *  - Inserts a user_activity row (best-effort)
- *  - If isOAuth === true: sets httpOnly cookies for token & sessionId and redirects to CLIENT_URL/account
- *  - Else: responds with JSON { user, token, sessionId }
+ *  - If isOAuth === true: sets httpOnly cookies for token & sessionId and redirects to CLIENT_URL/account?oauth=1
+ *  - Else: responds with JSON { message, user, token, sessionId }
  */
 function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType = "login" } = {}) {
   try {
@@ -253,8 +253,8 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
             console.warn("issueTokenAndRespond: failed to set cookies:", cookieErr);
           }
 
-          // Redirect to client account page
-          return res.redirect(`${CLIENT_URL}/account`);
+          // Redirect to client account page with oauth flag so frontend triggers /api/auth/me
+          return res.redirect(`${CLIENT_URL}/account?oauth=1`);
         }
 
         // Non-OAuth: return JSON (frontend may store token in localStorage)
@@ -278,13 +278,13 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
 // Google OAuth entry
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
 
-// Google OAuth callback: create/find user and then call issueTokenAndRespond with isOAuth=true
+// Google OAuth callback
 app.get(
   "/api/auth/google/callback",
   passport.authenticate("google", { session: false, failureRedirect: `${CLIENT_URL}/login?error=google_auth_failed` }),
   async (req, res) => {
     try {
-      console.log("Google callback invoked, profile:", !!req.user, req.user?.email);
+      console.log("Google callback invoked, profile present:", !!req.user, "email:", req.user?.email);
       const email = req.user?.email?.toLowerCase();
       if (!email) {
         console.warn("Google callback: no email in profile");
@@ -398,6 +398,7 @@ app.post("/api/login", (req, res) => {
 });
 
 // /api/auth/me - allow cookie-based or Authorization header token
+// IMPORTANT: This endpoint now returns token in JSON so frontend can store it in localStorage if desired.
 app.get("/api/auth/me", authenticateToken, (req, res) => {
   try {
     const userId = Number(req.user?.id);
@@ -410,9 +411,11 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
         return res.status(500).json({ message: "DB error or user not found" });
       }
 
-      // Refresh cookie token if token was provided via cookie (i.e. cookie flow)
+      // Sign a fresh token to return in JSON (and optionally refresh cookie)
+      const token = jwt.sign({ id: userRow.id, email: userRow.email, is_admin: userRow.is_admin }, JWT_SECRET, { expiresIn: "180d" });
+
+      // Optionally refresh cookie if desired (keeps httpOnly cookie in sync)
       try {
-        const token = jwt.sign({ id: userRow.id, email: userRow.email, is_admin: userRow.is_admin }, JWT_SECRET, { expiresIn: "180d" });
         res.cookie("token", token, AUTH_COOKIE_OPTIONS);
       } catch (cookieErr) {
         console.warn("/api/auth/me: failed to set token cookie:", cookieErr);
@@ -424,7 +427,8 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
       db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, now], function (insErr) {
         if (insErr) {
           console.warn("/api/auth/me: failed to insert session:", insErr.message);
-          return res.json({ user: userRow, sessionId: null });
+          // still return user, but sessionId null
+          return res.json({ user: userRow, sessionId: null, token });
         }
         const sessionId = this.lastID;
         // optionally set sessionId cookie for cookie flow
@@ -433,7 +437,7 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
         } catch (cookieErr) {
           console.warn("/api/auth/me: failed to set sessionId cookie:", cookieErr);
         }
-        return res.json({ user: userRow, sessionId });
+        return res.json({ user: userRow, sessionId, token });
       });
     });
   } catch (err) {
