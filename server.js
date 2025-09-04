@@ -274,9 +274,20 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
       }
 
       // Insert user_activity (action + created_at) — table only has action & created_at
-      db.run("INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))", [id, activityType], (actErr) => {
-        if (actErr) console.warn("issueTokenAndRespond: failed to insert user_activity:", actErr.message || actErr);
-      });
+     let activityText;
+if (activityType === "login") activityText = "Logged In";
+else if (activityType === "logout") activityText = "Logged Out";
+else if (activityType === "register") activityText = "Registered & Logged In";
+else activityText = activityType; // fallback
+
+db.run(
+  "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))",
+  [id, activityText],
+  (actErr) => {
+    if (actErr) console.warn("issueTokenAndRespond: failed to insert user_activity:", actErr.message || actErr);
+  }
+);
+
 
       // set cookies
       try {
@@ -525,10 +536,14 @@ app.post("/api/account/signout-session", async (req, res) => {
       }
 
       if (userId) {
-        db.run("INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))", [userId, "logout"], (actErr) => {
-          if (actErr) console.warn("signout-session: failed to insert user_activity:", actErr.message);
-        });
-      }
+        db.run(
+  "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))",
+  [userId, "Logged Out"],
+  (actErr) => {
+    if (actErr) console.warn("signout-session: failed to insert user_activity:", actErr.message);
+  }
+);
+
     }
 
     // Clear cookies immediately
@@ -608,3 +623,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
