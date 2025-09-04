@@ -1,4 +1,4 @@
-// server.js (final - de-duplicate user_activity & timestamps in IST)
+// server.js (corrected: DB stores UTC, dedupe fixed for logout)
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -92,23 +92,24 @@ db.serialize(() => {
       phone TEXT,
       password TEXT NOT NULL,
       is_admin INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+      -- store user.created_at in UTC
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
-  // match your current user_sessions schema exactly
+  // user_sessions per your current schema, last_active in UTC (CURRENT_TIMESTAMP)
   db.run(`
     CREATE TABLE IF NOT EXISTS user_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       device TEXT,
       ip TEXT,
-      last_active DATETIME,
+      last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `);
 
-  // match your current user_activity schema exactly
+  // user_activity: created_at DEFAULT CURRENT_TIMESTAMP (UTC)
   db.run(`
     CREATE TABLE IF NOT EXISTS user_activity (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,11 +149,12 @@ const AUTH_COOKIE_OPTIONS = {
 };
 
 // Insert user activity with de-duplication (prevents multiple identical rows within a short window)
+// NOTE: DB stores timestamps in UTC (CURRENT_TIMESTAMP). Frontend should convert to IST when showing to users.
 // action: string (e.g. "Logged In", "Logged Out", "Registered & Logged In")
 // cb(err, insertedId|null) - insertedId is null when skipped due to duplication
 function insertUserActivity(userId, action, cb) {
-  // 5-second de-duplication window (adjust as desired)
-  const dedupeSeconds = 5;
+  // dedupe window in seconds (adjust as needed). Use a small window to avoid race duplicates from repeated requests.
+  const dedupeSeconds = 3;
 
   // 1) find latest same-action row for this user
   db.get(
@@ -166,9 +168,9 @@ function insertUserActivity(userId, action, cb) {
       }
 
       if (!row) {
-        // no previous -> insert
+        // no previous -> insert (let DB set created_at = CURRENT_TIMESTAMP UTC)
         return db.run(
-          "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','+5 hours 30 minutes'))",
+          "INSERT INTO user_activity (user_id, action) VALUES (?, ?)",
           [userId, action],
           function (insErr) {
             if (insErr) {
@@ -180,16 +182,16 @@ function insertUserActivity(userId, action, cb) {
         );
       }
 
-      // 2) compute difference between now (IST) and previous created_at in seconds
+      // 2) compute difference between now (UTC) and previous created_at in seconds
       db.get(
-        "SELECT (strftime('%s','now','+5 hours 30 minutes') - strftime('%s', ?)) AS diff",
+        "SELECT (strftime('%s','now') - strftime('%s', ?)) AS diff",
         [row.created_at],
         (diffErr, diffRow) => {
           if (diffErr) {
             console.warn("insertUserActivity: diff calc error:", diffErr.message || diffErr);
             // fallback to inserting
             return db.run(
-              "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','+5 hours 30 minutes'))",
+              "INSERT INTO user_activity (user_id, action) VALUES (?, ?)",
               [userId, action],
               function (insErr) {
                 if (insErr) {
@@ -207,9 +209,9 @@ function insertUserActivity(userId, action, cb) {
             return cb && cb(null, null);
           }
 
-          // otherwise insert
+          // otherwise insert (let DB set created_at = CURRENT_TIMESTAMP UTC)
           db.run(
-            "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','+5 hours 30 minutes'))",
+            "INSERT INTO user_activity (user_id, action) VALUES (?, ?)",
             [userId, action],
             function (insErr) {
               if (insErr) {
@@ -282,10 +284,10 @@ passport.use(
  *  - Else try to find a session for user_id + device + ip (latest) and update last_active
  *  - Else insert new session row (user_id, device, ip, last_active)
  *
- * Note: last_active is stored in IST via datetime('now','+5 hours 30 minutes')
+ * Note: last_active uses UTC CURRENT_TIMESTAMP; frontend converts to IST for display.
  */
 function getOrCreateSession({ userId, providedSessionId = null, device, ip }, cb) {
-  const nowExpr = "datetime('now','+5 hours 30 minutes')";
+  const nowExpr = "CURRENT_TIMESTAMP"; // UTC
 
   if (providedSessionId) {
     db.get("SELECT id FROM user_sessions WHERE id = ? AND user_id = ?", [providedSessionId, userId], (err, row) => {
@@ -339,7 +341,7 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
     const name = userRow.name || "";
     const is_admin = Number(userRow.is_admin || 0);
 
-    // JWT token (we do NOT store it in user_sessions with current schema)
+    // JWT token
     const token = jwt.sign({ id, email, is_admin }, JWT_SECRET, { expiresIn: "180d" });
 
     const device = getDevice(req);
@@ -353,23 +355,21 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
         return res.status(500).json({ message: "Failed to create or update session" });
       }
 
-      // Normalise action text
+      // Normalize action text
       let activityText;
       if (activityType === "login") activityText = "Logged In";
       else if (activityType === "logout") activityText = "Logged Out";
       else if (activityType === "register") activityText = "Registered & Logged In";
       else activityText = activityType; // fallback
 
-      // Insert user activity (with de-duplication)
+      // Insert user activity (with dedupe) - DB will set created_at = CURRENT_TIMESTAMP (UTC)
       insertUserActivity(id, activityText, (actErr /*, insertedId */) => {
         if (actErr) console.warn("issueTokenAndRespond: failed to insert user_activity:", actErr.message || actErr);
       });
 
       // set cookies
       try {
-        // token cookie (httpOnly)
         res.cookie("token", token, AUTH_COOKIE_OPTIONS);
-        // sessionId cookie points to row in user_sessions
         res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
       } catch (cookieErr) {
         console.warn("issueTokenAndRespond: failed to set cookies:", cookieErr);
@@ -576,7 +576,7 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
  * This endpoint:
  *  - Deletes session row from DB (if sessionId provided).
  *  - Clears token & sessionId cookies.
- *  - Logs user_activity = "Logged Out" (de-duplicated).
+ *  - Logs user_activity = "Logged Out" (deduplicated by insertUserActivity).
  */
 app.post("/api/account/signout-session", async (req, res) => {
   try {
@@ -612,8 +612,8 @@ app.post("/api/account/signout-session", async (req, res) => {
         });
       }
 
+      // only insert the "Logged Out" activity once via insertUserActivity (dedupe)
       if (userId) {
-        // use helper to avoid duplicates & set IST timestamp
         insertUserActivity(userId, "Logged Out", (actErr /*, insertedId */) => {
           if (actErr) console.warn("signout-session: failed to insert user_activity:", actErr.message || actErr);
         });
