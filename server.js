@@ -1,4 +1,4 @@
-// server.js (updated to match your current DB schema)
+// server.js (final - de-duplicate user_activity & timestamps in IST)
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -147,6 +147,84 @@ const AUTH_COOKIE_OPTIONS = {
   maxAge: TOKEN_MAX_AGE_MS,
 };
 
+// Insert user activity with de-duplication (prevents multiple identical rows within a short window)
+// action: string (e.g. "Logged In", "Logged Out", "Registered & Logged In")
+// cb(err, insertedId|null) - insertedId is null when skipped due to duplication
+function insertUserActivity(userId, action, cb) {
+  // 5-second de-duplication window (adjust as desired)
+  const dedupeSeconds = 5;
+
+  // 1) find latest same-action row for this user
+  db.get(
+    "SELECT id, created_at FROM user_activity WHERE user_id = ? AND action = ? ORDER BY id DESC LIMIT 1",
+    [userId, action],
+    (err, row) => {
+      if (err) {
+        // don't block main flow on activity DB errors
+        console.warn("insertUserActivity: select error:", err.message || err);
+        return cb && cb(err);
+      }
+
+      if (!row) {
+        // no previous -> insert
+        return db.run(
+          "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','+5 hours 30 minutes'))",
+          [userId, action],
+          function (insErr) {
+            if (insErr) {
+              console.warn("insertUserActivity: insert error:", insErr.message || insErr);
+              return cb && cb(insErr);
+            }
+            return cb && cb(null, this.lastID);
+          }
+        );
+      }
+
+      // 2) compute difference between now (IST) and previous created_at in seconds
+      db.get(
+        "SELECT (strftime('%s','now','+5 hours 30 minutes') - strftime('%s', ?)) AS diff",
+        [row.created_at],
+        (diffErr, diffRow) => {
+          if (diffErr) {
+            console.warn("insertUserActivity: diff calc error:", diffErr.message || diffErr);
+            // fallback to inserting
+            return db.run(
+              "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','+5 hours 30 minutes'))",
+              [userId, action],
+              function (insErr) {
+                if (insErr) {
+                  console.warn("insertUserActivity: insert fallback error:", insErr.message || insErr);
+                  return cb && cb(insErr);
+                }
+                return cb && cb(null, this.lastID);
+              }
+            );
+          }
+
+          const diff = Number(diffRow?.diff ?? 999999);
+          if (diff <= dedupeSeconds) {
+            // skip insert - it's probably a duplicate
+            return cb && cb(null, null);
+          }
+
+          // otherwise insert
+          db.run(
+            "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','+5 hours 30 minutes'))",
+            [userId, action],
+            function (insErr) {
+              if (insErr) {
+                console.warn("insertUserActivity: insert error:", insErr.message || insErr);
+                return cb && cb(insErr);
+              }
+              return cb && cb(null, this.lastID);
+            }
+          );
+        }
+      );
+    }
+  );
+}
+
 // -------------------- JWT middleware --------------------
 function authenticateToken(req, res, next) {
   try {
@@ -203,15 +281,17 @@ passport.use(
  *  - If providedSessionId belongs to the user -> update last_active and return it
  *  - Else try to find a session for user_id + device + ip (latest) and update last_active
  *  - Else insert new session row (user_id, device, ip, last_active)
+ *
+ * Note: last_active is stored in IST via datetime('now','+5 hours 30 minutes')
  */
 function getOrCreateSession({ userId, providedSessionId = null, device, ip }, cb) {
-  const now = new Date().toISOString();
+  const nowExpr = "datetime('now','+5 hours 30 minutes')";
 
   if (providedSessionId) {
     db.get("SELECT id FROM user_sessions WHERE id = ? AND user_id = ?", [providedSessionId, userId], (err, row) => {
       if (err) return cb(err);
       if (row && row.id) {
-        db.run("UPDATE user_sessions SET last_active = ? WHERE id = ?", [now, providedSessionId], function (uErr) {
+        db.run(`UPDATE user_sessions SET last_active = ${nowExpr} WHERE id = ?`, [providedSessionId], function (uErr) {
           if (uErr) return cb(uErr);
           return cb(null, providedSessionId);
         });
@@ -230,14 +310,14 @@ function getOrCreateSession({ userId, providedSessionId = null, device, ip }, cb
       (err, existing) => {
         if (err) return cb(err);
         if (existing && existing.id) {
-          db.run("UPDATE user_sessions SET last_active = ? WHERE id = ?", [now, existing.id], function (uErr) {
+          db.run(`UPDATE user_sessions SET last_active = ${nowExpr} WHERE id = ?`, [existing.id], function (uErr) {
             if (uErr) return cb(uErr);
             return cb(null, existing.id);
           });
         } else {
           db.run(
-            "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-            [userId, device, ip, now],
+            `INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ${nowExpr})`,
+            [userId, device, ip],
             function (insErr) {
               if (insErr) return cb(insErr);
               return cb(null, this.lastID);
@@ -273,25 +353,21 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
         return res.status(500).json({ message: "Failed to create or update session" });
       }
 
-      // Insert user_activity (action + created_at) — table only has action & created_at
-     let activityText;
-if (activityType === "login") activityText = "Logged In";
-else if (activityType === "logout") activityText = "Logged Out";
-else if (activityType === "register") activityText = "Registered & Logged In";
-else activityText = activityType; // fallback
+      // Normalise action text
+      let activityText;
+      if (activityType === "login") activityText = "Logged In";
+      else if (activityType === "logout") activityText = "Logged Out";
+      else if (activityType === "register") activityText = "Registered & Logged In";
+      else activityText = activityType; // fallback
 
-db.run(
-  "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))",
-  [id, activityText],
-  (actErr) => {
-    if (actErr) console.warn("issueTokenAndRespond: failed to insert user_activity:", actErr.message || actErr);
-  }
-);
-
+      // Insert user activity (with de-duplication)
+      insertUserActivity(id, activityText, (actErr /*, insertedId */) => {
+        if (actErr) console.warn("issueTokenAndRespond: failed to insert user_activity:", actErr.message || actErr);
+      });
 
       // set cookies
       try {
-        // token cookie (httpOnly) — frontend can still request /api/auth/me to get user JSON
+        // token cookie (httpOnly)
         res.cookie("token", token, AUTH_COOKIE_OPTIONS);
         // sessionId cookie points to row in user_sessions
         res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
@@ -500,12 +576,11 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
  * This endpoint:
  *  - Deletes session row from DB (if sessionId provided).
  *  - Clears token & sessionId cookies.
- *  - Logs user_activity = logout.
+ *  - Logs user_activity = "Logged Out" (de-duplicated).
  */
 app.post("/api/account/signout-session", async (req, res) => {
   try {
-    const providedSessionId =
-      req.body?.sessionId ?? req.cookies?.sessionId ?? null;
+    const providedSessionId = req.body?.sessionId ?? req.cookies?.sessionId ?? null;
 
     // Extract userId from token if available
     let userId = null;
@@ -526,42 +601,22 @@ app.post("/api/account/signout-session", async (req, res) => {
       const sid = Number(providedSessionId);
 
       if (userId) {
-        db.run(
-          "DELETE FROM user_sessions WHERE id = ? AND user_id = ?",
-          [sid, userId],
-          function (delErr) {
-            if (delErr)
-              console.warn(
-                "signout-session: db delete error (user-scoped):",
-                delErr.message
-              );
-            else console.log("signout-session: removed session", sid, "for user", userId);
-          }
-        );
+        db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [sid, userId], function (delErr) {
+          if (delErr) console.warn("signout-session: db delete error (user-scoped):", delErr.message);
+          else console.log("signout-session: removed session", sid, "for user", userId);
+        });
       } else {
-        db.run(
-          "DELETE FROM user_sessions WHERE id = ?",
-          [sid],
-          function (delErr) {
-            if (delErr)
-              console.warn("signout-session: db delete error (id-only):", delErr.message);
-            else console.log("signout-session: removed session", sid);
-          }
-        );
+        db.run("DELETE FROM user_sessions WHERE id = ?", [sid], function (delErr) {
+          if (delErr) console.warn("signout-session: db delete error (id-only):", delErr.message);
+          else console.log("signout-session: removed session", sid);
+        });
       }
 
       if (userId) {
-        db.run(
-          "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))",
-          [userId, "Logged Out"],
-          (actErr) => {
-            if (actErr)
-              console.warn(
-                "signout-session: failed to insert user_activity:",
-                actErr.message
-              );
-          }
-        );
+        // use helper to avoid duplicates & set IST timestamp
+        insertUserActivity(userId, "Logged Out", (actErr /*, insertedId */) => {
+          if (actErr) console.warn("signout-session: failed to insert user_activity:", actErr.message || actErr);
+        });
       }
     }
 
@@ -581,7 +636,6 @@ app.post("/api/account/signout-session", async (req, res) => {
     return res.status(500).json({ success: false, error: "signout failed" });
   }
 });
-
 
 // -------------------- Root + health routes --------------------
 app.get("/", (req, res) => {
@@ -643,5 +697,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
-
-
