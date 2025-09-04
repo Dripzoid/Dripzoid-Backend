@@ -133,13 +133,13 @@ router.post("/change-password", auth, (req, res) => {
     db.run("UPDATE users SET password = ? WHERE id = ?", [hashed, userId], (err2) => {
       if (err2) {
         console.error("DB error updating password:", err2.message);
-        return res.status(500).json({ error: "Failed to update password", details: err2.message });
+        return res.status(500).json({ error: "Failed to Update Password", details: err2.message });
       }
 
-      db.run("INSERT INTO user_activity (user_id, action) VALUES (?, ?)", [userId, "Changed password"], (aErr) => {
+      db.run("INSERT INTO user_activity (user_id, action) VALUES (?, ?)", [userId, "Changed Password"], (aErr) => {
         if (aErr) console.error("Failed to log activity (change password):", aErr.message);
         // respond regardless of activity logging result
-        res.json({ success: true, message: "Password updated" });
+        res.json({ success: true, message: "Password Updated" });
       });
     });
   });
@@ -206,7 +206,7 @@ router.post("/notifications", auth, (req, res) => {
         return res.status(500).json({ error: "Failed to update notifications", details: err2.message });
       }
 
-      db.run("INSERT INTO user_activity (user_id, action) VALUES (?, ?)", [userId, "Updated notification preferences"], (aErr) => {
+      db.run("INSERT INTO user_activity (user_id, action) VALUES (?, ?)", [userId, "Updated Notification Preferences"], (aErr) => {
         if (aErr) console.error("Failed to log activity (notifications):", aErr.message);
         res.json({ success: true });
       });
@@ -283,6 +283,7 @@ router.delete("/delete", auth, (req, res) => {
 });
 
 export default router;
+
 
 
 
