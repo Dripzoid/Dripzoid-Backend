@@ -504,7 +504,8 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
  */
 app.post("/api/account/signout-session", async (req, res) => {
   try {
-    const providedSessionId = req.body?.sessionId ?? req.cookies?.sessionId ?? null;
+    const providedSessionId =
+      req.body?.sessionId ?? req.cookies?.sessionId ?? null;
 
     // Extract userId from token if available
     let userId = null;
@@ -523,27 +524,45 @@ app.post("/api/account/signout-session", async (req, res) => {
 
     if (providedSessionId != null) {
       const sid = Number(providedSessionId);
+
       if (userId) {
-        db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [sid, userId], function (delErr) {
-          if (delErr) console.warn("signout-session: db delete error (user-scoped):", delErr.message);
-          else console.log("signout-session: removed session", sid, "for user", userId);
-        });
+        db.run(
+          "DELETE FROM user_sessions WHERE id = ? AND user_id = ?",
+          [sid, userId],
+          function (delErr) {
+            if (delErr)
+              console.warn(
+                "signout-session: db delete error (user-scoped):",
+                delErr.message
+              );
+            else console.log("signout-session: removed session", sid, "for user", userId);
+          }
+        );
       } else {
-        db.run("DELETE FROM user_sessions WHERE id = ?", [sid], function (delErr) {
-          if (delErr) console.warn("signout-session: db delete error (id-only):", delErr.message);
-          else console.log("signout-session: removed session", sid);
-        });
+        db.run(
+          "DELETE FROM user_sessions WHERE id = ?",
+          [sid],
+          function (delErr) {
+            if (delErr)
+              console.warn("signout-session: db delete error (id-only):", delErr.message);
+            else console.log("signout-session: removed session", sid);
+          }
+        );
       }
 
       if (userId) {
         db.run(
-  "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))",
-  [userId, "Logged Out"],
-  (actErr) => {
-    if (actErr) console.warn("signout-session: failed to insert user_activity:", actErr.message);
-  }
-);
-
+          "INSERT INTO user_activity (user_id, action, created_at) VALUES (?, ?, datetime('now','localtime'))",
+          [userId, "Logged Out"],
+          (actErr) => {
+            if (actErr)
+              console.warn(
+                "signout-session: failed to insert user_activity:",
+                actErr.message
+              );
+          }
+        );
+      }
     }
 
     // Clear cookies immediately
@@ -562,6 +581,7 @@ app.post("/api/account/signout-session", async (req, res) => {
     return res.status(500).json({ success: false, error: "signout failed" });
   }
 });
+
 
 // -------------------- Root + health routes --------------------
 app.get("/", (req, res) => {
@@ -623,4 +643,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
