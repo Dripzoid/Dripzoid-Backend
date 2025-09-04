@@ -1,4 +1,4 @@
-// backend/server.js
+// server.js (corrected)
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -76,7 +76,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// -------------------- DB init --------------------
+// -------------------- DB init + lightweight migrations --------------------
 const DB_PATH = process.env.DATABASE_FILE || path.join(__dirname, "./dripzoid.db");
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) console.error("❌ SQLite connection error:", err.message);
@@ -84,6 +84,7 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 });
 app.locals.db = db;
 
+// Create baseline tables and perform idempotent migrations
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -97,27 +98,78 @@ db.serialize(() => {
     )
   `);
 
+  // canonical sessions table
   db.run(`
     CREATE TABLE IF NOT EXISTS user_sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
+      token TEXT,
+      expires_at TEXT,
       device TEXT,
       ip TEXT,
-      last_active TEXT
+      last_active TEXT,
+      created_at TEXT DEFAULT (datetime('now', 'localtime')),
+      is_active INTEGER DEFAULT 1,
+      FOREIGN KEY (user_id) REFERENCES users(id)
     )
   `);
 
+  // canonical activity table
   db.run(`
     CREATE TABLE IF NOT EXISTS user_activity (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
-      type TEXT,
+      action TEXT,
       device TEXT,
       ip TEXT,
       created_at TEXT DEFAULT (datetime('now', 'localtime')),
       FOREIGN KEY(user_id) REFERENCES users(id)
     )
   `);
+
+  // ensureColumn helper
+  function ensureColumn(table, column, definition) {
+    db.all(`PRAGMA table_info(${table})`, (err, rows) => {
+      if (err) {
+        console.warn(`ensureColumn: PRAGMA failed for ${table}`, err?.message || err);
+        return;
+      }
+      const exists = rows.some((r) => r.name === column);
+      if (!exists) {
+        db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`, (addErr) => {
+          if (addErr) console.error(`Failed to add column ${column} to ${table}:`, addErr.message);
+          else console.log(`Migration: added column ${column} to ${table}`);
+        });
+      }
+    });
+  }
+
+  // compatibility: ensure commonly used columns exist
+  ensureColumn("user_sessions", "token", "TEXT");
+  ensureColumn("user_sessions", "expires_at", "TEXT");
+  ensureColumn("user_sessions", "created_at", "TEXT DEFAULT (datetime('now', 'localtime'))");
+  ensureColumn("user_sessions", "is_active", "INTEGER DEFAULT 1");
+  ensureColumn("user_sessions", "device", "TEXT");
+  ensureColumn("user_sessions", "ip", "TEXT");
+  ensureColumn("user_sessions", "last_active", "TEXT");
+
+  ensureColumn("user_activity", "action", "TEXT");
+  ensureColumn("user_activity", "device", "TEXT");
+  ensureColumn("user_activity", "ip", "TEXT");
+  ensureColumn("user_activity", "created_at", "TEXT DEFAULT (datetime('now', 'localtime'))");
+
+  // if old column 'type' exists, copy to 'action' for existing rows
+  db.all(`PRAGMA table_info(user_activity)`, (err, cols) => {
+    if (err) return;
+    const hasType = cols.some((c) => c.name === "type");
+    const hasAction = cols.some((c) => c.name === "action");
+    if (hasType && hasAction) {
+      db.run(`UPDATE user_activity SET action = type WHERE (action IS NULL OR action = '') AND (type IS NOT NULL AND type != '')`, (uErr) => {
+        if (uErr) console.warn("Migration: copying user_activity.type -> action failed:", uErr.message);
+        else console.log("Migration: copied user_activity.type -> action (if present)");
+      });
+    }
+  });
 });
 
 // -------------------- Helpers --------------------
@@ -200,14 +252,70 @@ passport.use(
   )
 );
 
-// -------------------- Token issuance utility --------------------
+// -------------------- Session helper --------------------
 /**
- * issueTokenAndRespond:
- *  - Creates a user_sessions row
- *  - Inserts a user_activity row (best-effort)
- *  - If isOAuth === true: sets httpOnly cookies for token & sessionId and redirects to CLIENT_URL/account?oauth=1
- *  - Else: responds with JSON { message, user, token, sessionId }
+ * getOrCreateSession
+ *  - Reuses provided sessionId if valid for this user
+ *  - Else finds existing active session for user+device+ip and updates it
+ *  - Else inserts a new session
+ *  - Calls cb(err, sessionId)
  */
+function getOrCreateSession({ userId, providedSessionId = null, device, ip, token = null, expiresAt = null }, cb) {
+  const now = new Date().toISOString();
+
+  function findOrInsert() {
+    db.get(
+      "SELECT id FROM user_sessions WHERE user_id = ? AND device = ? AND ip = ? AND is_active = 1 ORDER BY last_active DESC LIMIT 1",
+      [userId, device, ip],
+      (err, existing) => {
+        if (err) return cb(err);
+        if (existing && existing.id) {
+          db.run(
+            "UPDATE user_sessions SET last_active = ?, token = ?, expires_at = ?, device = ?, ip = ?, is_active = 1 WHERE id = ?",
+            [now, token, expiresAt, device, ip, existing.id],
+            function (uErr) {
+              if (uErr) return cb(uErr);
+              return cb(null, existing.id);
+            }
+          );
+        } else {
+          db.run(
+            "INSERT INTO user_sessions (user_id, token, expires_at, device, ip, last_active, created_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            [userId, token, expiresAt, device, ip, now, now],
+            function (insErr) {
+              if (insErr) return cb(insErr);
+              return cb(null, this.lastID);
+            }
+          );
+        }
+      }
+    );
+  }
+
+  if (providedSessionId) {
+    db.get("SELECT * FROM user_sessions WHERE id = ? AND user_id = ?", [providedSessionId, userId], (err, row) => {
+      if (err) return cb(err);
+      if (row) {
+        db.run(
+          "UPDATE user_sessions SET last_active = ?, token = ?, expires_at = ?, device = ?, ip = ?, is_active = 1 WHERE id = ?",
+          [now, token, expiresAt, device, ip, providedSessionId],
+          function (uErr) {
+            if (uErr) return cb(uErr);
+            return cb(null, providedSessionId);
+          }
+        );
+        return;
+      }
+      // fallback to finding or inserting
+      findOrInsert();
+    });
+    return;
+  }
+
+  findOrInsert();
+}
+
+// -------------------- Token issuance utility (updated) --------------------
 function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType = "login" } = {}) {
   try {
     const id = Number(userRow.id);
@@ -220,52 +328,43 @@ function issueTokenAndRespond(req, res, userRow, { isOAuth = false, activityType
     const device = getDevice(req);
     const ip = getIP(req);
     const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + TOKEN_MAX_AGE_MS).toISOString();
 
-    db.run(
-      "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-      [id, device, ip, now],
-      function (err2) {
-        if (err2) {
-          console.error("issueTokenAndRespond: failed to create session:", err2.message);
-          if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=session_create_failed`);
-          return res.status(500).json({ message: "Failed to create session" });
-        }
+    const providedSessionId = req.cookies?.sessionId ? Number(req.cookies.sessionId) : null;
 
-        const sessionId = this.lastID;
-
-        // log activity (best-effort)
-        db.run(
-          "INSERT INTO user_activity (user_id, type, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
-          [id, activityType, device, ip, now],
-          (actErr) => {
-            if (actErr) console.warn("issueTokenAndRespond: failed to insert user_activity:", actErr.message);
-            // continue
-          }
-        );
-
-        if (isOAuth) {
-          // Set httpOnly cookies so client is authenticated without exposing token in URL
-          try {
-            res.cookie("token", token, AUTH_COOKIE_OPTIONS);
-            res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
-            console.log("issueTokenAndRespond: set cookies for user", id, "sessionId", sessionId);
-          } catch (cookieErr) {
-            console.warn("issueTokenAndRespond: failed to set cookies:", cookieErr);
-          }
-
-          // Redirect to client account page with oauth flag so frontend triggers /api/auth/me
-          return res.redirect(`${CLIENT_URL}/account?oauth=1`);
-        }
-
-        // Non-OAuth: return JSON (frontend may store token in localStorage)
-        return res.json({
-          message: "Success",
-          user: { id, name, email, is_admin },
-          token,
-          sessionId,
-        });
+    getOrCreateSession({ userId: id, providedSessionId, device, ip, token, expiresAt }, (sessErr, sessionId) => {
+      if (sessErr) {
+        console.error("issueTokenAndRespond: session create/update failed:", sessErr.message || sessErr);
+        if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=session_create_failed`);
+        return res.status(500).json({ message: "Failed to create or update session" });
       }
-    );
+
+      // Insert user activity (best-effort) — use canonical 'action' column
+      db.run(
+        "INSERT INTO user_activity (user_id, action, device, ip, created_at) VALUES (?, ?, ?, ?, ?)",
+        [id, activityType, device, ip, now],
+        (actErr) => {
+          if (actErr) console.warn("issueTokenAndRespond: failed to insert user_activity:", actErr.message);
+        }
+      );
+
+      if (isOAuth) {
+        try {
+          res.cookie("token", token, AUTH_COOKIE_OPTIONS);
+          res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
+        } catch (cookieErr) {
+          console.warn("issueTokenAndRespond: failed to set cookies:", cookieErr);
+        }
+        return res.redirect(`${CLIENT_URL}/account?oauth=1`);
+      }
+
+      return res.json({
+        message: "Success",
+        user: { id, name, email, is_admin },
+        token,
+        sessionId,
+      });
+    });
   } catch (err) {
     console.error("issueTokenAndRespond error:", err);
     if (isOAuth) return res.redirect(`${CLIENT_URL}/login?error=token_issue_failed`);
@@ -409,7 +508,6 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
     const userId = Number(req.user?.id);
     if (!userId) return res.status(401).json({ message: "Not authenticated" });
 
-    const now = new Date().toISOString();
     db.get("SELECT id, name, email, phone, is_admin, created_at FROM users WHERE id = ?", [userId], (err, userRow) => {
       if (err || !userRow) {
         console.error("/api/auth/me DB error:", err);
@@ -429,14 +527,14 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
       // Create or update session record and return sessionId (best-effort)
       const device = getDevice(req);
       const ip = getIP(req);
-      db.run("INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)", [userId, device, ip, now], function (insErr) {
-        if (insErr) {
-          console.warn("/api/auth/me: failed to insert session:", insErr.message);
-          // still return user, but sessionId null
+      const providedSessionId = req.cookies?.sessionId ? Number(req.cookies.sessionId) : null;
+      const expiresAt = new Date(Date.now() + TOKEN_MAX_AGE_MS).toISOString();
+
+      getOrCreateSession({ userId: userRow.id, providedSessionId, device, ip, token, expiresAt }, (sessErr, sessionId) => {
+        if (sessErr) {
+          console.warn("/api/auth/me: failed to create/update session:", sessErr.message || sessErr);
           return res.json({ user: userRow, sessionId: null, token });
         }
-        const sessionId = this.lastID;
-        // optionally set sessionId cookie for cookie flow
         try {
           res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
         } catch (cookieErr) {
@@ -457,8 +555,9 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
  * Body: { sessionId?: number|null }
  *
  * This endpoint:
- *  - Deletes session row from DB (if sessionId provided).
+ *  - Deletes or deactivates session row from DB (if sessionId provided).
  *  - Clears token & sessionId cookies.
+ *  - Logs user_activity = logout.
  *  - Always returns { success: true }.
  */
 app.post("/api/account/signout-session", async (req, res) => {
@@ -480,18 +579,27 @@ app.post("/api/account/signout-session", async (req, res) => {
       }
     }
 
-    // Delete session from DB (best-effort)
+    // Deactivate session from DB (best-effort)
     if (providedSessionId != null) {
       const sid = Number(providedSessionId);
       if (userId) {
-        db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [sid, userId], function (delErr) {
-          if (delErr) console.warn("signout-session: db delete error (user-scoped):", delErr.message);
-          else console.log("signout-session: removed session", sid, "for user", userId);
+        db.run("UPDATE user_sessions SET is_active = 0 WHERE id = ? AND user_id = ?", [sid, userId], function (delErr) {
+          if (delErr) console.warn("signout-session: db update error (user-scoped):", delErr.message);
+          else console.log("signout-session: deactivated session", sid, "for user", userId);
         });
       } else {
-        db.run("DELETE FROM user_sessions WHERE id = ?", [sid], function (delErr) {
-          if (delErr) console.warn("signout-session: db delete error (id-only):", delErr.message);
-          else console.log("signout-session: removed session", sid);
+        db.run("UPDATE user_sessions SET is_active = 0 WHERE id = ?", [sid], function (delErr) {
+          if (delErr) console.warn("signout-session: db update error (id-only):", delErr.message);
+          else console.log("signout-session: deactivated session", sid);
+        });
+      }
+
+      // write logout activity if we know userId
+      if (userId) {
+        const device = getDevice(req);
+        const ip = getIP(req);
+        db.run("INSERT INTO user_activity (user_id, action, device, ip, created_at) VALUES (?, ?, ?, ?, ?)", [userId, "logout", device, ip, new Date().toISOString()], (actErr) => {
+          if (actErr) console.warn("signout-session: failed to insert user_activity:", actErr.message);
         });
       }
     }
@@ -506,14 +614,13 @@ app.post("/api/account/signout-session", async (req, res) => {
     res.clearCookie("token", cookieOpts);
     res.clearCookie("sessionId", cookieOpts);
 
-    // Return success only after cookies cleared
+    // Return success
     return res.json({ success: true });
   } catch (err) {
     console.error("signout-session error:", err);
     return res.status(500).json({ success: false, error: "signout failed" });
   }
 });
-
 
 // -------------------- Root + health routes --------------------
 app.get("/", (req, res) => {
@@ -575,4 +682,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
-
