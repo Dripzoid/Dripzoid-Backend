@@ -25,6 +25,7 @@
     "streamifier": "^0.1.1",
     "ua-parser-js": "^1.0.37",
     "express-session": "^1.17.3",
+    "better-sqlite3": "^8.2.0",
     "cookie-parser": "^1.4.6"
   },
   "devDependencies": {
