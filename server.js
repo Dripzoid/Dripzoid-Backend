@@ -1,4 +1,4 @@
-// server.js (full version with OTP integration)
+// server.js (final merged with OTP + login/register)
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -157,7 +157,6 @@ function insertUserActivity(userId, action, cb) {
     [userId, action],
     (err, row) => {
       if (err) return cb && cb(err);
-
       if (!row) {
         return db.run(
           "INSERT INTO user_activity (user_id, action) VALUES (?, ?)",
@@ -168,7 +167,6 @@ function insertUserActivity(userId, action, cb) {
           }
         );
       }
-
       db.get(
         "SELECT (strftime('%s','now') - strftime('%s', ?)) AS diff",
         [row.created_at],
@@ -176,7 +174,6 @@ function insertUserActivity(userId, action, cb) {
           if (diffErr) return cb && cb(diffErr);
           const diff = Number(diffRow?.diff ?? 999999);
           if (diff <= dedupeSeconds) return cb && cb(null, null);
-
           db.run(
             "INSERT INTO user_activity (user_id, action) VALUES (?, ?)",
             [userId, action],
@@ -232,8 +229,72 @@ passport.use(
   )
 );
 
-// -------------------- Mount OTP Webhook --------------------
+// -------------------- OTP Routes --------------------
 app.use("/api", otpRoutes);
+
+// -------------------- Auth (Register + Login) --------------------
+app.post("/api/register", async (req, res) => {
+  try {
+    const { name, email, phone, password } = req.body;
+    if (!name || !email || !phone || !password)
+      return res.status(400).json({ message: "All fields required" });
+
+    const normalizedEmail = email.toLowerCase();
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    db.run(
+      "INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, 0)",
+      [name, normalizedEmail, phone, hashedPassword],
+      function (err) {
+        if (err) {
+          if (err.message.includes("UNIQUE constraint failed"))
+            return res.status(409).json({ message: "Email already exists" });
+          return res.status(500).json({ message: err.message });
+        }
+        db.get("SELECT * FROM users WHERE id = ?", [this.lastID], (err2, userRow) => {
+          if (err2 || !userRow) return res.status(500).json({ message: "DB error" });
+
+          // Insert session + activity
+          insertUserActivity(userRow.id, "Registered Account", () => {});
+          db.run(
+            "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
+            [userRow.id, getDevice(req), getIP(req)]
+          );
+
+          return res.json({ user: { id: userRow.id, email: userRow.email, name: userRow.name } });
+        });
+      }
+    );
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+
+app.post("/api/login", (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ message: "Email and password required" });
+
+  const normalizedEmail = email.toLowerCase();
+  db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
+    if (err) return res.status(500).json({ message: err.message });
+    if (!row) return res.status(404).json({ message: "User not found" });
+
+    const isMatch = await bcrypt.compare(password, row.password);
+    if (!isMatch) return res.status(401).json({ message: "Invalid password" });
+
+    // Insert session + activity
+    insertUserActivity(row.id, "Logged In", () => {});
+    db.run(
+      "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
+      [row.id, getDevice(req), getIP(req)]
+    );
+
+    return res.json({ user: { id: row.id, email: row.email, name: row.name } });
+  });
+});
+
 
 // -------------------- Mount Other Routes --------------------
 app.use("/api/wishlist", wishlistRoutes);
@@ -254,7 +315,9 @@ app.use("/api/qa", qaRouter);
 app.use("/api/votes", votesRouter);
 
 // -------------------- Root + Health --------------------
-app.get("/", (req, res) => res.send(`<h2>Dripzoid Backend</h2><p>API available. Use /api routes.</p>`));
+app.get("/", (req, res) =>
+  res.send(`<h2>Dripzoid Backend</h2><p>API available. Use /api routes.</p>`)
+);
 app.get("/test-env", (req, res) =>
   res.json({
     nodeEnv: process.env.NODE_ENV || "development",
@@ -286,6 +349,3 @@ app.listen(PORT, () =>
 );
 
 export { app, db };
-
-
-
