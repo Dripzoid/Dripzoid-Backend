@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import { v2 as cloudinary } from "cloudinary";
+import  cloudinary  from "./cloudinary.js";
 import streamifier from "streamifier";
 
 const router = express.Router();
@@ -41,3 +41,4 @@ router.post("/", upload.single("image"), async (req, res) => {
 });
 
 export default router;
+
