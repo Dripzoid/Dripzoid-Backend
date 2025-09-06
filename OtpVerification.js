@@ -77,12 +77,14 @@ router.post("/send-otp", async (req, res) => {
         "authkey": process.env.MSG91_AUTHKEY
       },
       body: JSON.stringify({
-        sender: process.env.MSG91_EMAIL_SENDER,
-        template: process.env.MSG91_EMAIL_TEMPLATE,
-        recipients: [
-          { to: [{ email, name: email }], variables: { OTP: otp } }
-        ]
-      })
+  from: { email: process.env.MSG91_EMAIL_SENDER },
+  domain: "dripzoid.com",
+  template_id: process.env.MSG91_EMAIL_TEMPLATE,
+  recipients: [
+    { to: [{ email, name: email }], variables: { OTP: otp } }
+  ]
+})
+
     });
 
     const json = await response.json();
