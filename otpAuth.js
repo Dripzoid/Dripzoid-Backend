@@ -147,4 +147,35 @@ router.post("/complete-registration", async (req, res) => {
   });
 });
 
+router.post("/send-otp", (req, res) => {
+  const db = req.app.locals.db;
+  const email = (req.body?.email || "").toLowerCase();
+  if (!email) return res.status(400).json({ message: "Email required" });
+
+  ensureOtpColumns(db);
+
+  const otp = generateOTP(6);
+  const otpHash = hashOTP(otp);
+  const now = Math.floor(Date.now() / 1000);
+  const reqId = crypto.randomUUID(); // optional request ID
+
+  // Insert or replace OTP in otpData
+  db.run(
+    "INSERT INTO otpData (email, otp_hash, otp_created_at, attempts, used, req_id) VALUES (?, ?, ?, 0, 0, ?) " +
+    "ON CONFLICT(email) DO UPDATE SET otp_hash=excluded.otp_hash, otp_created_at=excluded.otp_created_at, attempts=0, used=0, req_id=excluded.req_id",
+    [email, otpHash, now, reqId],
+    (err) => {
+      if (err) {
+        console.error("send-otp db error:", err);
+        return res.status(500).json({ message: "DB error" });
+      }
+
+      // Ideally, send OTP via email/SMS here
+      console.log(`OTP for ${email}: ${otp}`); // For testing only
+
+      return res.json({ message: "OTP sent", reqId });
+    }
+  );
+});
+
 export default router;
