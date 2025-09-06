@@ -2,6 +2,9 @@
 import express from "express";
 import crypto from "crypto";
 import Database from "better-sqlite3";
+import dotenv from "dotenv";
+
+dotenv.config(); // Load .env variables
 
 const router = express.Router();
 
@@ -38,8 +41,16 @@ function hashOTP(otp) {
 // OTP webhook endpoint
 router.post("/otp-webhook", (req, res) => {
   try {
+    // Validate secret
+    const incomingSecret = req.headers["x-msg91-secret"];
+    const MSG91_SECRET = process.env.MSG91_SECRET;
+    if (!incomingSecret || incomingSecret !== MSG91_SECRET) {
+      console.log("Unauthorized webhook attempt");
+      return res.status(401).send("Unauthorized");
+    }
+
     const { type, mobile, otp } = req.body;
-    const emailOrMobile = mobile; // rename for clarity
+    const emailOrMobile = mobile;
 
     console.log(
       `[Webhook] Event: ${type}, Email/Mobile: ${maskEmail(emailOrMobile)}, OTP: ${maskOTP(otp)}`
@@ -63,7 +74,7 @@ router.post("/otp-webhook", (req, res) => {
       }
 
       case "OTP_VERIFIED": {
-        // Here you can optionally remove the OTP after verification
+        // Optionally remove the OTP after verification
         db.prepare("DELETE FROM otpData WHERE email = ?").run(emailOrMobile);
         console.log(`OTP verified for ${maskEmail(emailOrMobile)}`);
         break;
