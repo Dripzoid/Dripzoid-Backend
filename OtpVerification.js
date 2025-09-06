@@ -1,19 +1,33 @@
 // OtpVerification.js
-const express = require("express");
-const crypto = require("crypto");
-const Database = require("better-sqlite3");
+import express from "express";
+import crypto from "crypto";
+import Database from "better-sqlite3";
+
 const router = express.Router();
 
-// Open SQLite DB (dripzoid.db)
+// Open SQLite DB
 const db = new Database("./dripzoid.db");
 
-// Ensure columns exist (for OTP handling)
-try { db.prepare("ALTER TABLE users ADD COLUMN otp_hash TEXT").run(); } catch {}
-try { db.prepare("ALTER TABLE users ADD COLUMN otp_created_at INTEGER").run(); } catch {}
-try { db.prepare("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0").run(); } catch {}
+// Ensure columns exist (OTP handling)
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN otp_hash TEXT").run();
+} catch (err) {
+  if (!err.message.includes("duplicate column")) console.error(err);
+}
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN otp_created_at INTEGER").run();
+} catch (err) {
+  if (!err.message.includes("duplicate column")) console.error(err);
+}
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0").run();
+} catch (err) {
+  if (!err.message.includes("duplicate column")) console.error(err);
+}
 
 // Utility: Mask email
 function maskEmail(email) {
+  if (!email) return "";
   const [user, domain] = email.split("@");
   return user[0] + "***@" + domain;
 }
@@ -40,35 +54,37 @@ function markUserVerified(email) {
   }
 }
 
-// Webhook endpoint
-router.post("/otp-webhook", async (req, res) => {
+// OTP webhook endpoint
+router.post("/otp-webhook", (req, res) => {
   try {
     const { type, mobile, otp } = req.body;
+    const emailOrMobile = mobile; // rename for clarity
 
     console.log(
-      `[Webhook] Event: ${type}, Email/Mobile: ${maskEmail(mobile)}, OTP: ${maskOTP(otp)}`
+      `[Webhook] Event: ${type}, Email/Mobile: ${maskEmail(emailOrMobile)}, OTP: ${maskOTP(otp)}`
     );
 
     switch (type) {
-      case "OTP_SENT":
+      case "OTP_SENT": {
         const otpHash = hashOTP(otp);
         const now = Math.floor(Date.now() / 1000);
 
         const stmt = db.prepare(`
           INSERT INTO users (email, otp_hash, otp_created_at)
           VALUES (?, ?, ?)
-          ON CONFLICT(email) DO UPDATE SET otp_hash = ?, otp_created_at = ?
+          ON CONFLICT(email) DO UPDATE SET otp_hash = excluded.otp_hash, otp_created_at = excluded.otp_created_at
         `);
-        stmt.run(mobile, otpHash, now, otpHash, now);
-        console.log(`OTP stored in DB for ${maskEmail(mobile)}`);
+        stmt.run(emailOrMobile, otpHash, now);
+        console.log(`OTP stored in DB for ${maskEmail(emailOrMobile)}`);
         break;
+      }
 
       case "OTP_VERIFIED":
-        markUserVerified(mobile);
+        markUserVerified(emailOrMobile);
         break;
 
       case "OTP_FAILED":
-        console.log(`OTP failed for ${maskEmail(mobile)}`);
+        console.log(`OTP failed for ${maskEmail(emailOrMobile)}`);
         break;
 
       default:
