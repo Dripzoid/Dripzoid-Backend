@@ -1,4 +1,4 @@
-// server.js (final merged with OTP + login/register)
+// server.js (final — merged with OTP + login/register, sessions, activity, JWT cookies)
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -150,6 +150,7 @@ const AUTH_COOKIE_OPTIONS = {
   maxAge: TOKEN_MAX_AGE_MS,
 };
 
+// Insert user_activity with simple dedupe window (seconds)
 function insertUserActivity(userId, action, cb) {
   const dedupeSeconds = 3;
   db.get(
@@ -167,23 +168,16 @@ function insertUserActivity(userId, action, cb) {
           }
         );
       }
-      db.get(
-        "SELECT (strftime('%s','now') - strftime('%s', ?)) AS diff",
-        [row.created_at],
-        (diffErr, diffRow) => {
-          if (diffErr) return cb && cb(diffErr);
-          const diff = Number(diffRow?.diff ?? 999999);
-          if (diff <= dedupeSeconds) return cb && cb(null, null);
-          db.run(
-            "INSERT INTO user_activity (user_id, action) VALUES (?, ?)",
-            [userId, action],
-            function (insErr) {
-              if (insErr) return cb && cb(insErr);
-              return cb && cb(null, this.lastID);
-            }
-          );
-        }
-      );
+
+      db.get("SELECT (strftime('%s','now') - strftime('%s', ?)) AS diff", [row.created_at], (diffErr, diffRow) => {
+        if (diffErr) return cb && cb(diffErr);
+        const diff = Number(diffRow?.diff ?? 999999);
+        if (diff <= dedupeSeconds) return cb && cb(null, null);
+        db.run("INSERT INTO user_activity (user_id, action) VALUES (?, ?)", [userId, action], function (insErr) {
+          if (insErr) return cb && cb(insErr);
+          return cb && cb(null, this.lastID);
+        });
+      });
     }
   );
 }
@@ -193,7 +187,9 @@ function authenticateToken(req, res, next) {
   try {
     let token = null;
     const authHeader = req.headers["authorization"];
-    if (authHeader?.toLowerCase()?.startsWith("bearer ")) token = authHeader.split(" ")[1];
+    if (authHeader && typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")) {
+      token = authHeader.split(" ")[1];
+    }
     if (!token && req.cookies?.token) token = req.cookies.token;
     if (!token) return res.status(401).json({ message: "No token provided" });
 
@@ -232,12 +228,52 @@ passport.use(
 // -------------------- OTP Routes --------------------
 app.use("/api", otpRoutes);
 
+// -------------------- Token issuance helper --------------------
+function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success") {
+  try {
+    const id = Number(userRow.id);
+    const email = (userRow.email || "").toLowerCase();
+    const is_admin = Number(userRow.is_admin || 0);
+
+    const token = jwt.sign({ id, email, is_admin }, JWT_SECRET, { expiresIn: "180d" });
+
+    // set cookies (best-effort)
+    try {
+      res.cookie("token", token, AUTH_COOKIE_OPTIONS);
+      res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
+    } catch (cookieErr) {
+      console.warn("issueTokenAndRespond: failed to set cookies:", cookieErr);
+    }
+
+    // build user object for response (include created_at if available)
+    const userResp = {
+      id,
+      name: userRow.name || null,
+      email,
+      phone: userRow.phone || null,
+      is_admin,
+    };
+    if (userRow.created_at) userResp.created_at = userRow.created_at;
+
+    return res.json({
+      message,
+      token,
+      sessionId,
+      user: userResp,
+    });
+  } catch (err) {
+    console.error("issueTokenAndRespond error:", err);
+    return res.status(500).json({ message: "Failed to issue token" });
+  }
+}
+
 // -------------------- Auth (Register + Login) --------------------
+
+// Register
 app.post("/api/register", async (req, res) => {
   try {
     const { name, email, phone, password } = req.body;
-    if (!name || !email || !phone || !password)
-      return res.status(400).json({ message: "All fields required" });
+    if (!name || !email || !phone || !password) return res.status(400).json({ message: "All fields required" });
 
     const normalizedEmail = email.toLowerCase();
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -247,54 +283,88 @@ app.post("/api/register", async (req, res) => {
       [name, normalizedEmail, phone, hashedPassword],
       function (err) {
         if (err) {
-          if (err.message.includes("UNIQUE constraint failed"))
+          if (err.message && err.message.includes("UNIQUE constraint failed")) {
             return res.status(409).json({ message: "Email already exists" });
-          return res.status(500).json({ message: err.message });
+          }
+          console.error("Register insert error:", err);
+          return res.status(500).json({ message: "Failed to register" });
         }
-        db.get("SELECT * FROM users WHERE id = ?", [this.lastID], (err2, userRow) => {
-          if (err2 || !userRow) return res.status(500).json({ message: "DB error" });
 
-          // Insert session + activity
-          insertUserActivity(userRow.id, "Registered Account", () => {});
+        const createdUserId = this.lastID;
+        db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, userRow) => {
+          if (err2 || !userRow) {
+            console.error("Register fetch created user error:", err2);
+            return res.status(500).json({ message: "DB error" });
+          }
+
+          // create session (and capture sessionId)
           db.run(
             "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-            [userRow.id, getDevice(req), getIP(req)]
-          );
+            [userRow.id, getDevice(req), getIP(req)],
+            function (sessErr) {
+              if (sessErr) {
+                console.error("Register session insert error:", sessErr);
+                return res.status(500).json({ message: "Failed to create session" });
+              }
+              const sessionId = this.lastID;
 
-          return res.json({ user: { id: userRow.id, email: userRow.email, name: userRow.name } });
+              // activity (fire-and-forget)
+              insertUserActivity(userRow.id, "Registered & Logged In", () => {});
+
+              // issue token, set cookies, return expected JSON
+              return issueTokenAndRespond(req, res, userRow, sessionId, "User registered successfully");
+            }
+          );
         });
       }
     );
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error("Register error:", err);
+    return res.status(500).json({ message: err.message || "Internal error" });
   }
 });
 
-
+// Login
 app.post("/api/login", (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password)
-    return res.status(400).json({ message: "Email and password required" });
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ message: "Email and password required" });
 
-  const normalizedEmail = email.toLowerCase();
-  db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
-    if (err) return res.status(500).json({ message: err.message });
-    if (!row) return res.status(404).json({ message: "User not found" });
+    const normalizedEmail = email.toLowerCase();
+    db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
+      if (err) {
+        console.error("Login DB error:", err);
+        return res.status(500).json({ message: "DB error" });
+      }
+      if (!row) return res.status(404).json({ message: "User not found" });
 
-    const isMatch = await bcrypt.compare(password, row.password);
-    if (!isMatch) return res.status(401).json({ message: "Invalid password" });
+      const isMatch = await bcrypt.compare(password, row.password);
+      if (!isMatch) return res.status(401).json({ message: "Invalid password" });
 
-    // Insert session + activity
-    insertUserActivity(row.id, "Logged In", () => {});
-    db.run(
-      "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-      [row.id, getDevice(req), getIP(req)]
-    );
+      // create session
+      db.run(
+        "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
+        [row.id, getDevice(req), getIP(req)],
+        function (sessErr) {
+          if (sessErr) {
+            console.error("Login session insert error:", sessErr);
+            return res.status(500).json({ message: "Failed to create session" });
+          }
+          const sessionId = this.lastID;
 
-    return res.json({ user: { id: row.id, email: row.email, name: row.name } });
-  });
+          // activity (fire-and-forget)
+          insertUserActivity(row.id, "Logged In", () => {});
+
+          // respond with token + sessionId + user (including created_at)
+          return issueTokenAndRespond(req, res, row, sessionId, "Login successful");
+        }
+      );
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    return res.status(500).json({ message: "Internal error" });
+  }
 });
-
 
 // -------------------- Mount Other Routes --------------------
 app.use("/api/wishlist", wishlistRoutes);
@@ -315,9 +385,7 @@ app.use("/api/qa", qaRouter);
 app.use("/api/votes", votesRouter);
 
 // -------------------- Root + Health --------------------
-app.get("/", (req, res) =>
-  res.send(`<h2>Dripzoid Backend</h2><p>API available. Use /api routes.</p>`)
-);
+app.get("/", (req, res) => res.send(`<h2>Dripzoid Backend</h2><p>API available. Use /api routes.</p>`));
 app.get("/test-env", (req, res) =>
   res.json({
     nodeEnv: process.env.NODE_ENV || "development",
@@ -330,7 +398,10 @@ app.get("/test-env", (req, res) =>
 
 // -------------------- Error & 404 Handlers --------------------
 app.use((req, res) => {
-  if (req.path.startsWith("/api/")) return res.status(404).json({ message: "API route not found" });
+  if (req.path.startsWith("/api/")) {
+    console.warn("404 API route:", req.method, req.originalUrl);
+    return res.status(404).json({ message: "API route not found" });
+  }
   res.status(404).send("Not Found");
 });
 app.use((err, req, res, next) => {
@@ -344,8 +415,6 @@ process.on("unhandledRejection", (reason) => console.error("UNHANDLED REJECTION:
 
 // -------------------- Start Server --------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`)
-);
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
