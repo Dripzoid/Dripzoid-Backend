@@ -36,7 +36,6 @@ import votesRouter from "./votes.js";
 
 // Import OTP webhook
 import otpRoutes from "./OtpVerification.js";
-import otpAuthRoutes from "./otpAuth.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -235,7 +234,6 @@ passport.use(
 
 // -------------------- Mount OTP Webhook --------------------
 app.use("/api", otpRoutes);
-app.use("/api", otpAuthRoutes);
 
 // -------------------- Mount Other Routes --------------------
 app.use("/api/wishlist", wishlistRoutes);
@@ -288,5 +286,6 @@ app.listen(PORT, () =>
 );
 
 export { app, db };
+
 
 
