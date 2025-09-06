@@ -8,22 +8,14 @@ const router = express.Router();
 // Open SQLite DB
 const db = new Database("./dripzoid.db");
 
-// Ensure columns exist (OTP handling)
-try {
-  db.prepare("ALTER TABLE users ADD COLUMN otp_hash TEXT").run();
-} catch (err) {
-  if (!err.message.includes("duplicate column")) console.error(err);
-}
-try {
-  db.prepare("ALTER TABLE users ADD COLUMN otp_created_at INTEGER").run();
-} catch (err) {
-  if (!err.message.includes("duplicate column")) console.error(err);
-}
-try {
-  db.prepare("ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0").run();
-} catch (err) {
-  if (!err.message.includes("duplicate column")) console.error(err);
-}
+// Ensure otpData table exists (temporary OTP storage)
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS otpData (
+    email TEXT PRIMARY KEY,
+    otp_hash TEXT NOT NULL,
+    otp_created_at INTEGER NOT NULL
+  )
+`).run();
 
 // Utility: Mask email
 function maskEmail(email) {
@@ -43,17 +35,6 @@ function hashOTP(otp) {
   return crypto.createHash("sha256").update(otp).digest("hex");
 }
 
-// Mark user as verified
-function markUserVerified(email) {
-  const stmt = db.prepare("UPDATE users SET verified = 1 WHERE email = ?");
-  const result = stmt.run(email);
-  if (result.changes > 0) {
-    console.log(`DB Update: User ${maskEmail(email)} marked as verified.`);
-  } else {
-    console.log(`DB Update: User ${maskEmail(email)} not found.`);
-  }
-}
-
 // OTP webhook endpoint
 router.post("/otp-webhook", (req, res) => {
   try {
@@ -69,19 +50,24 @@ router.post("/otp-webhook", (req, res) => {
         const otpHash = hashOTP(otp);
         const now = Math.floor(Date.now() / 1000);
 
+        // Insert or update OTP in otpData table
         const stmt = db.prepare(`
-          INSERT INTO users (email, otp_hash, otp_created_at)
+          INSERT INTO otpData (email, otp_hash, otp_created_at)
           VALUES (?, ?, ?)
           ON CONFLICT(email) DO UPDATE SET otp_hash = excluded.otp_hash, otp_created_at = excluded.otp_created_at
         `);
         stmt.run(emailOrMobile, otpHash, now);
-        console.log(`OTP stored in DB for ${maskEmail(emailOrMobile)}`);
+
+        console.log(`OTP stored in otpData for ${maskEmail(emailOrMobile)}`);
         break;
       }
 
-      case "OTP_VERIFIED":
-        markUserVerified(emailOrMobile);
+      case "OTP_VERIFIED": {
+        // Here you can optionally remove the OTP after verification
+        db.prepare("DELETE FROM otpData WHERE email = ?").run(emailOrMobile);
+        console.log(`OTP verified for ${maskEmail(emailOrMobile)}`);
         break;
+      }
 
       case "OTP_FAILED":
         console.log(`OTP failed for ${maskEmail(emailOrMobile)}`);
