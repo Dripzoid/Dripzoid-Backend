@@ -39,6 +39,27 @@ function hashOTP(otp) {
   return crypto.createHash("sha256").update(String(otp)).digest("hex");
 }
 
+// -------------------- CHECK EMAIL --------------------
+// POST /api/check-email
+// Body: { email }
+router.post("/check-email", (req, res) => {
+  try {
+    const email = (req.body?.email || "").toLowerCase();
+    if (!email) {
+      return res.status(400).json({ message: "Email required" });
+    }
+
+    const row = db
+      .prepare("SELECT id FROM users WHERE lower(email) = ?")
+      .get(email);
+
+    return res.json({ exists: !!row });
+  } catch (err) {
+    console.error("check-email error:", err);
+    res.status(500).json({ message: "DB error" });
+  }
+});
+
 // -------------------- OTP WEBHOOK (MSG91 callback) --------------------
 router.post("/otp-webhook", (req, res) => {
   try {
