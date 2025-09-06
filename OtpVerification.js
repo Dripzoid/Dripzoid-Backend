@@ -49,13 +49,10 @@ router.post("/check-email", (req, res) => {
 // -------------------- SEND OTP --------------------
 router.post("/send-otp", async (req, res) => {
   try {
-    const emailOrMobile = req.body?.email?.toLowerCase() || req.body?.mobile;
-    if (!emailOrMobile) return res.status(400).json({ message: "Email or mobile required" });
+    const email = (req.body?.email || "").toLowerCase();
+    if (!email) return res.status(400).json({ message: "Email required" });
 
-    // Generate random 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // Hash OTP and store in DB
     const otpHash = hashOTP(otp);
     const now = Math.floor(Date.now() / 1000);
 
@@ -63,23 +60,31 @@ router.post("/send-otp", async (req, res) => {
       INSERT INTO otpData (email, otp_hash, otp_created_at)
       VALUES (?, ?, ?)
       ON CONFLICT(email) DO UPDATE SET otp_hash=excluded.otp_hash, otp_created_at=excluded.otp_created_at
-    `).run(emailOrMobile, otpHash, now);
+    `).run(email, otpHash, now);
 
-    // Send OTP via MSG91
-    const msg91Response = await fetch("https://control.msg91.com/api/v5/otp", {
+    // Send OTP via MSG91 Email API
+    const response = await fetch("https://control.msg91.com/api/v5/email/send", {
       method: "POST",
-      headers: { "Content-Type": "application/json", authkey: process.env.MSG91_AUTHKEY },
+      headers: {
+        "Content-Type": "application/json",
+        "authkey": process.env.MSG91_AUTHKEY
+      },
       body: JSON.stringify({
-        template_id: process.env.MSG91_OTP_TEMPLATE_ID,
-        mobile: emailOrMobile,
-        otp: otp,
-      }),
+        sender: process.env.MSG91_EMAIL_SENDER, // verified sender
+        template: process.env.MSG91_EMAIL_TEMPLATE,
+        recipients: [
+          {
+            to: [{ email, name: email }],
+            variables: { OTP: otp }
+          }
+        ]
+      })
     });
 
-    const json = await msg91Response.json();
-    console.log("send-otp response:", json);
+    const json = await response.json();
+    console.log("send-otp email response:", json);
 
-    if (json.type === "success") {
+    if (json.type === "success" || json.message?.includes("queued")) {
       return res.json({ success: true, message: "OTP sent successfully" });
     }
 
@@ -89,6 +94,7 @@ router.post("/send-otp", async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
 
 // -------------------- VERIFY OTP --------------------
 router.post("/verify-otp", (req, res) => {
