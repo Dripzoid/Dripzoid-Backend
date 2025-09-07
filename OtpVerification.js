@@ -53,53 +53,95 @@ router.post("/check-email", (req, res) => {
 });
 
 // -------------------- SEND OTP --------------------
+// Example: router.post("/send-otp", ...)
 router.post("/send-otp", async (req, res) => {
   try {
-    const email = (req.body?.email || "").toLowerCase();
-    if (!email) return res.status(400).json({ message: "Email required" });
+    const email = (req.body?.email || "").toLowerCase().trim();
+    if (!email) return res.status(400).json({ success: false, message: "Email required" });
 
-    // Generate OTP
+    // required env vars
+    const AUTHKEY = process.env.MSG91_AUTHKEY;
+    const SENDER = process.env.MSG91_EMAIL_SENDER;       // e.g. "no-reply@yourdomain.com"
+    const TEMPLATE_ID = process.env.MSG91_EMAIL_TEMPLATE; // template id (string or numeric depending on control API)
+    const DOMAIN = process.env.MSG91_DOMAIN || "dripzoid.com";
+    const LOGO_URL = process.env.MSG91_LOGO_URL || "";   // logo url to pass into template
+
+    if (!AUTHKEY || !SENDER || !TEMPLATE_ID) {
+      console.error("MSG91 env variables missing:", { AUTHKEY: !!AUTHKEY, SENDER: !!SENDER, TEMPLATE_ID: !!TEMPLATE_ID });
+      return res.status(500).json({ success: false, message: "Server not configured to send OTP (MSG91 missing)." });
+    }
+
+    // generate 6-digit OTP (crypto not strictly necessary for 6-digit but OK)
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpHash = hashOTP(otp);
     const now = Math.floor(Date.now() / 1000);
 
+    // store/replace OTP record in otpData table
     db.prepare(`
       INSERT INTO otpData (email, otp_hash, otp_created_at, attempts)
       VALUES (?, ?, ?, 0)
       ON CONFLICT(email) DO UPDATE SET otp_hash=excluded.otp_hash, otp_created_at=excluded.otp_created_at, attempts=0
     `).run(email, otpHash, now);
 
-    // Send via MSG91 Email API
+    // Construct MSG91 request payload (include template variables required by your template)
+    // IMPORTANT: variable names here must match the placeholders used inside your MSG91 template (case-sensitive)
+    const payload = {
+      from: { email: SENDER },
+      domain: DOMAIN,
+      template_id: TEMPLATE_ID,
+      recipients: [
+        {
+          to: [{ email, name: email }],
+          variables: {
+            logo_url: LOGO_URL,
+             OTP: otp
+          }
+        }
+      ]
+    };
+
+    // call MSG91 email API
     const response = await fetch("https://control.msg91.com/api/v5/email/send", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "authkey": process.env.MSG91_AUTHKEY
+        "authkey": AUTHKEY
       },
-      body: JSON.stringify({
-  from: { email: process.env.MSG91_EMAIL_SENDER },
-  domain: "dripzoid.com",
-  template_id: process.env.MSG91_EMAIL_TEMPLATE,
-  recipients: [
-    { to: [{ email, name: email }], variables: { OTP: otp } }
-  ]
-})
-
+      body: JSON.stringify(payload)
     });
 
-    const json = await response.json();
+    const json = await response.json().catch(() => ({}));
     console.log("send-otp email response:", json);
 
-    if (!json.hasError) {
+    // MSG91 responds in a few formats; be defensive
+    const success =
+      response.ok &&
+      // older/typical: { hasError: false, ... }
+      (json.hasError === false ||
+       // alternative: check for message code or recipients status
+       (typeof json.status === "string" && /success/i.test(json.status)) ||
+       // or any success flag the API returns
+       json.message === "message sent" ||
+       json.message === "success");
+
+    if (success) {
       return res.json({ success: true, message: "OTP sent successfully" });
     }
 
-    return res.status(400).json({ success: false, data: json });
+    // If the provider returned an error, surface useful bits
+    const errorPayload = {
+      success: false,
+      message: json?.message || "MSG91 responded with an error",
+      details: json
+    };
+    console.warn("MSG91 send failed:", errorPayload);
+    return res.status(400).json(errorPayload);
   } catch (err) {
     console.error("send-otp error:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    return res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
 
 // -------------------- VERIFY OTP --------------------
 router.post("/verify-otp", (req, res) => {
