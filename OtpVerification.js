@@ -94,7 +94,7 @@ router.post("/send-otp", async (req, res) => {
           to: [{ email, name: email }],
           variables: {
             logo_url: LOGO_URL,
-             OTP: otp
+             otp_code: otp
           }
         }
       ]
