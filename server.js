@@ -259,6 +259,32 @@ function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success")
   }
 }
 
+const createSessionAndRespond = (user, actionLabel) => {
+  db.run(
+    "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
+    [user.id, getDevice(req), getIP(req)],
+    function (sessErr) {
+      if (sessErr) return res.status(500).json({ error: "session" });
+      const sessionId = this.lastID;
+
+      insertUserActivity(user.id, actionLabel, () => {});
+
+      const token = jwt.sign(
+        { id: Number(user.id), email: user.email, is_admin: Number(user.is_admin || 0) },
+        JWT_SECRET,
+        { expiresIn: "180d" }
+      );
+
+      return res.json({
+        token,
+        sessionId,
+        user,
+      });
+    }
+  );
+};
+
+
 // -------------------- Auth --------------------
 
 // Register
@@ -357,6 +383,7 @@ app.post("/api/reset-password", async (req, res) => {
   }
 });
 
+
 // -------------------- Google OAuth --------------------
 
 // Initiate Google OAuth
@@ -371,66 +398,62 @@ app.get(
       const profile = req.user || {};
       const email = (profile.email || "").toLowerCase();
       const name = profile.name || "";
-      if (!email) return res.redirect(`${CLIENT_URL}/login?error=google_no_email`);
+      if (!email) return res.status(400).json({ error: "google_no_email" });
 
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-        if (err) return res.redirect(`${CLIENT_URL}/login?error=server`);
+        if (err) return res.status(500).json({ error: "server" });
 
-        if (row) {
+        const createSessionAndRespond = (user, actionLabel) => {
           db.run(
             "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-            [row.id, getDevice(req), getIP(req)],
+            [user.id, getDevice(req), getIP(req)],
             function (sessErr) {
-              if (sessErr) return res.redirect(`${CLIENT_URL}/login?error=session`);
+              if (sessErr) return res.status(500).json({ error: "session" });
               const sessionId = this.lastID;
-              insertUserActivity(row.id, "Logged In (Google)", () => {});
-              const token = jwt.sign({ id: Number(row.id), email: row.email, is_admin: Number(row.is_admin || 0) }, JWT_SECRET, { expiresIn: "180d" });
-              try {
-                res.cookie("token", token, AUTH_COOKIE_OPTIONS);
-                res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
-              } catch {}
-              return res.redirect(`${CLIENT_URL}/account`);
+              insertUserActivity(user.id, actionLabel, () => {});
+              const token = jwt.sign(
+                { id: Number(user.id), email: user.email, is_admin: Number(user.is_admin || 0) },
+                JWT_SECRET,
+                { expiresIn: "180d" }
+              );
+
+              return res.json({
+                token,
+                sessionId,
+                user,
+              });
             }
           );
-          return;
+        };
+
+        if (row) {
+          // Existing user → login
+          return createSessionAndRespond(row, "Logged In (Google)");
         }
 
-        // create new Google user with random password hash
+        // New Google user → register
         const randomPass = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(randomPass, 10);
         db.run(
           "INSERT INTO users (name, email, phone, password, gender, dob, is_admin) VALUES (?, ?, ?, ?, ?, ?, 0)",
           [name || null, email, null, hashedPassword, null, null],
           function (insErr) {
-            if (insErr) return res.redirect(`${CLIENT_URL}/login?error=create`);
+            if (insErr) return res.status(500).json({ error: "create" });
             const createdUserId = this.lastID;
             db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, newUserRow) => {
-              if (err2 || !newUserRow) return res.redirect(`${CLIENT_URL}/login?error=db`);
-
-              db.run(
-                "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-                [newUserRow.id, getDevice(req), getIP(req)],
-                function (sessErr) {
-                  if (sessErr) return res.redirect(`${CLIENT_URL}/login?error=session`);
-                  const sessionId = this.lastID;
-                  insertUserActivity(newUserRow.id, "Registered via Google", () => {});
-                  const token = jwt.sign({ id: Number(newUserRow.id), email: newUserRow.email, is_admin: Number(newUserRow.is_admin || 0) }, JWT_SECRET, { expiresIn: "180d" });
-                  try {
-                    res.cookie("token", token, AUTH_COOKIE_OPTIONS);
-                    res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
-                  } catch {}
-                  return res.redirect(`${CLIENT_URL}/account`);
-                }
-              );
+              if (err2 || !newUserRow) return res.status(500).json({ error: "db" });
+              return createSessionAndRespond(newUserRow, "Registered via Google");
             });
           }
         );
       });
     } catch (err) {
-      return res.redirect(`${CLIENT_URL}/login?error=internal`);
+      console.error(err);
+      return res.status(500).json({ error: "internal" });
     }
   }
 );
+
 
 // -------------------- Signout and session management --------------------
 
@@ -581,6 +604,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
