@@ -1,4 +1,4 @@
-// server.js (final — includes password reset endpoints)
+// server.js (final — fully corrected)
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -23,7 +23,7 @@ import { auth } from "./auth.js";
 import adminStatsRoutes from "./adminStats.js";
 import orderRoutes from "./orderRoutes.js";
 import uploadRoutes from "./uploadRoutes.js";
-import featuredRoutes from "./featuredRoutes.js";
+import featuredRoutes from "./featured.js";
 import userOrdersRoutes from "./userOrders.js";
 import addressRoutes from "./address.js";
 import paymentsRouter from "./payments.js";
@@ -33,7 +33,7 @@ import reviewsRouter from "./reviews.js";
 import qaRouter from "./qa.js";
 import votesRouter from "./votes.js";
 
-import otpRoutes from "./OtpVerification.js"; // existing OTP webhook routes if any
+import otpRoutes from "./OtpVerification.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -84,7 +84,6 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 app.locals.db = db;
 
 db.serialize(() => {
-  // users table includes gender/dob and OTP fields
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,7 +150,7 @@ const AUTH_COOKIE_OPTIONS = {
   maxAge: TOKEN_MAX_AGE_MS,
 };
 
-// Insert user_activity with simple dedupe window (seconds)
+// Insert user_activity with dedupe
 function insertUserActivity(userId, action, cb) {
   const dedupeSeconds = 3;
   db.get(
@@ -169,7 +168,6 @@ function insertUserActivity(userId, action, cb) {
           }
         );
       }
-
       db.get("SELECT (strftime('%s','now') - strftime('%s', ?)) AS diff", [row.created_at], (diffErr, diffRow) => {
         if (diffErr) return cb && cb(diffErr);
         const diff = Number(diffRow?.diff ?? 999999);
@@ -188,9 +186,7 @@ function authenticateToken(req, res, next) {
   try {
     let token = null;
     const authHeader = req.headers["authorization"];
-    if (authHeader && typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")) {
-      token = authHeader.split(" ")[1];
-    }
+    if (authHeader?.toLowerCase().startsWith("bearer ")) token = authHeader.split(" ")[1];
     if (!token && req.cookies?.token) token = req.cookies.token;
     if (!token) return res.status(401).json({ message: "No token provided" });
 
@@ -226,10 +222,10 @@ passport.use(
   )
 );
 
-// -------------------- OTP Routes (existing webhook) --------------------
+// -------------------- OTP Routes --------------------
 app.use("/api", otpRoutes);
 
-// -------------------- Token issuance helper --------------------
+// -------------------- Token helper --------------------
 function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success") {
   try {
     const id = Number(userRow.id);
@@ -245,7 +241,6 @@ function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success")
       console.warn("issueTokenAndRespond: failed to set cookies:", cookieErr);
     }
 
-    // build user object for response (include created_at if available)
     const userResp = {
       id,
       name: userRow.name || null,
@@ -257,28 +252,20 @@ function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success")
     };
     if (userRow.created_at) userResp.created_at = userRow.created_at;
 
-    return res.json({
-      message,
-      token,
-      sessionId,
-      user: userResp,
-    });
+    return res.json({ message, token, sessionId, user: userResp });
   } catch (err) {
     console.error("issueTokenAndRespond error:", err);
     return res.status(500).json({ message: "Failed to issue token" });
   }
 }
 
-// -------------------- Auth (Register + Login + Google) --------------------
+// -------------------- Auth --------------------
 
 // Register
 app.post("/api/register", async (req, res) => {
   try {
-    // accept mobile or phone from frontend
     const { name, email, phone, mobile, password, gender, dob } = req.body;
     const phoneVal = phone || mobile || "";
-
-    // Require minimal fields (name, email, password). phone/gender/dob optional.
     if (!name || !email || !password) return res.status(400).json({ message: "Name, email and password required" });
 
     const normalizedEmail = (email || "").toLowerCase();
@@ -289,35 +276,22 @@ app.post("/api/register", async (req, res) => {
       [name, normalizedEmail, phoneVal, hashedPassword, gender || null, dob || null],
       function (err) {
         if (err) {
-          if (err.message && err.message.includes("UNIQUE constraint failed")) {
-            return res.status(409).json({ message: "Email already exists" });
-          }
+          if (err.message.includes("UNIQUE constraint failed")) return res.status(409).json({ message: "Email already exists" });
           console.error("Register insert error:", err);
           return res.status(500).json({ message: "Failed to register" });
         }
 
         const createdUserId = this.lastID;
         db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, userRow) => {
-          if (err2 || !userRow) {
-            console.error("Register fetch created user error:", err2);
-            return res.status(500).json({ message: "DB error" });
-          }
+          if (err2 || !userRow) return res.status(500).json({ message: "DB error" });
 
-          // create session (and capture sessionId)
           db.run(
             "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
             [userRow.id, getDevice(req), getIP(req)],
             function (sessErr) {
-              if (sessErr) {
-                console.error("Register session insert error:", sessErr);
-                return res.status(500).json({ message: "Failed to create session" });
-              }
+              if (sessErr) return res.status(500).json({ message: "Failed to create session" });
               const sessionId = this.lastID;
-
-              // activity (fire-and-forget)
               insertUserActivity(userRow.id, "Registered & Logged In", () => {});
-
-              // issue token, set cookies, return expected JSON
               return issueTokenAndRespond(req, res, userRow, sessionId, "User registered successfully");
             }
           );
@@ -338,118 +312,52 @@ app.post("/api/login", (req, res) => {
 
     const normalizedEmail = email.toLowerCase();
     db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
-      if (err) {
-        console.error("Login DB error:", err);
-        return res.status(500).json({ message: "DB error" });
-      }
+      if (err) return res.status(500).json({ message: "DB error" });
       if (!row) return res.status(404).json({ message: "User not found" });
 
       const isMatch = await bcrypt.compare(password, row.password);
       if (!isMatch) return res.status(401).json({ message: "Invalid password" });
 
-      // create session
       db.run(
         "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
         [row.id, getDevice(req), getIP(req)],
         function (sessErr) {
-          if (sessErr) {
-            console.error("Login session insert error:", sessErr);
-            return res.status(500).json({ message: "Failed to create session" });
-          }
+          if (sessErr) return res.status(500).json({ message: "Failed to create session" });
           const sessionId = this.lastID;
-
-          // activity (fire-and-forget)
           insertUserActivity(row.id, "Logged In", () => {});
-
-          // respond with token + sessionId + user (including created_at)
           return issueTokenAndRespond(req, res, row, sessionId, "Login successful");
         }
       );
     });
   } catch (err) {
-    console.error("Login error:", err);
     return res.status(500).json({ message: "Internal error" });
   }
 });
 
 // -------------------- Password reset endpoints --------------------
-
-// Request password reset (sends OTP)
-app.post("/api/request-password-reset", (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ message: "Email required" });
-    const normalizedEmail = String(email).toLowerCase();
-
-    db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], (err, row) => {
-      if (err) {
-        console.error("request-password-reset db error:", err);
-        return res.status(500).json({ message: "DB error" });
-      }
-      if (!row) return res.status(404).json({ message: "User not found" });
-
-      // create numeric 6-digit OTP
-      const otpPlain = String(Math.floor(100000 + Math.random() * 900000));
-      const otpHash = crypto.createHash("sha256").update(otpPlain).digest("hex");
-      const now = Date.now();
-
-      db.run("UPDATE users SET otp_hash = ?, otp_created_at = ? WHERE id = ?", [otpHash, now, row.id], function (updErr) {
-        if (updErr) {
-          console.error("request-password-reset update error:", updErr);
-          return res.status(500).json({ message: "Failed to set OTP" });
-        }
-
-        // TODO: replace console.log with real email/SMS send in production
-        console.log(`Password reset OTP for ${normalizedEmail}: ${otpPlain}`);
-
-        insertUserActivity(row.id, "Requested password reset", () => {});
-        return res.json({ message: "OTP sent (check email). In dev mode OTP logged to server console." });
-      });
-    });
-  } catch (err) {
-    console.error("request-password-reset error:", err);
-    return res.status(500).json({ message: "Internal error" });
-  }
-});
-
-// Reset password using OTP
 app.post("/api/reset-password", async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) 
-      return res.status(400).json({ message: "Email and new password required" });
+    if (!email || !password) return res.status(400).json({ message: "Email and new password required" });
 
     const normalizedEmail = String(email).toLowerCase();
-    
     db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
-      if (err) {
-        console.error("reset-password db error:", err);
-        return res.status(500).json({ message: "DB error" });
-      }
+      if (err) return res.status(500).json({ message: "DB error" });
       if (!row) return res.status(404).json({ message: "User not found" });
 
       const newHashed = await bcrypt.hash(password, 10);
-      db.run(
-        "UPDATE users SET password = ? WHERE id = ?",
-        [newHashed, row.id],
-        function (updErr) {
-          if (updErr) {
-            console.error("reset-password update error:", updErr);
-            return res.status(500).json({ message: "Failed to update password" });
-          }
-
-          insertUserActivity(row.id, "Password Reset", () => {});
-          return res.json({ message: "Password updated" });
-        }
-      );
+      db.run("UPDATE users SET password = ? WHERE id = ?", [newHashed, row.id], function (updErr) {
+        if (updErr) return res.status(500).json({ message: "Failed to update password" });
+        insertUserActivity(row.id, "Password Reset", () => {});
+        return res.json({ message: "Password updated" });
+      });
     });
   } catch (err) {
-    console.error("reset-password error:", err);
     return res.status(500).json({ message: "Internal error" });
   }
 });
 
-// -------------------- Google OAuth routes --------------------
+// -------------------- Google OAuth --------------------
 
 // Initiate Google OAuth
 app.get("/api/auth/google", passport.authenticate("google", { scope: ["profile", "email"], session: false }));
@@ -460,81 +368,57 @@ app.get(
   passport.authenticate("google", { failureRedirect: `${CLIENT_URL}/login`, session: false }),
   async (req, res) => {
     try {
-      // req.user is set by GoogleStrategy done()
       const profile = req.user || {};
       const email = (profile.email || "").toLowerCase();
       const name = profile.name || "";
-      if (!email) {
-        // Can't proceed without email
-        return res.redirect(`${CLIENT_URL}/login?error=google_no_email`);
-      }
+      if (!email) return res.redirect(`${CLIENT_URL}/login?error=google_no_email`);
 
-      // find existing user by email
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-        if (err) {
-          console.error("Google auth DB error:", err);
-          return res.redirect(`${CLIENT_URL}/login?error=server`);
-        }
+        if (err) return res.redirect(`${CLIENT_URL}/login?error=server`);
 
         if (row) {
-          // user exists -> create session and issue token
           db.run(
             "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
             [row.id, getDevice(req), getIP(req)],
             function (sessErr) {
-              if (sessErr) {
-                console.error("Google login session insert error:", sessErr);
-                return res.redirect(`${CLIENT_URL}/login?error=session`);
-              }
+              if (sessErr) return res.redirect(`${CLIENT_URL}/login?error=session`);
               const sessionId = this.lastID;
               insertUserActivity(row.id, "Logged In (Google)", () => {});
               const token = jwt.sign({ id: Number(row.id), email: row.email, is_admin: Number(row.is_admin || 0) }, JWT_SECRET, { expiresIn: "180d" });
               try {
                 res.cookie("token", token, AUTH_COOKIE_OPTIONS);
                 res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
-              } catch (cookieErr) {
-                console.warn("Google callback: failed to set cookies:", cookieErr);
-              }
+              } catch {}
               return res.redirect(`${CLIENT_URL}/account`);
             }
           );
           return;
         }
 
-        // create new user for google (password hashed random)
+        // create new Google user with random password hash
         const randomPass = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(randomPass, 10);
         db.run(
           "INSERT INTO users (name, email, phone, password, gender, dob, verified, is_admin) VALUES (?, ?, ?, ?, ?, ?, 1, 0)",
           [name || null, email, null, hashedPassword, null, null],
           function (insErr) {
-            if (insErr) {
-              console.error("Google create user error:", insErr);
-              return res.redirect(`${CLIENT_URL}/login?error=create`);
-            }
+            if (insErr) return res.redirect(`${CLIENT_URL}/login?error=create`);
             const createdUserId = this.lastID;
             db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, newUserRow) => {
-              if (err2 || !newUserRow) {
-                console.error("Google fetch created user error:", err2);
-                return res.redirect(`${CLIENT_URL}/login?error=db`);
-              }
+              if (err2 || !newUserRow) return res.redirect(`${CLIENT_URL}/login?error=db`);
+
               db.run(
                 "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
                 [newUserRow.id, getDevice(req), getIP(req)],
                 function (sessErr) {
-                  if (sessErr) {
-                    console.error("Google create session error:", sessErr);
-                    return res.redirect(`${CLIENT_URL}/login?error=session`);
-                  }
+                  if (sessErr) return res.redirect(`${CLIENT_URL}/login?error=session`);
                   const sessionId = this.lastID;
                   insertUserActivity(newUserRow.id, "Registered via Google", () => {});
                   const token = jwt.sign({ id: Number(newUserRow.id), email: newUserRow.email, is_admin: Number(newUserRow.is_admin || 0) }, JWT_SECRET, { expiresIn: "180d" });
                   try {
                     res.cookie("token", token, AUTH_COOKIE_OPTIONS);
                     res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
-                  } catch (cookieErr) {
-                    console.warn("Google callback: failed to set cookies:", cookieErr);
-                  }
+                  } catch {}
                   return res.redirect(`${CLIENT_URL}/account`);
                 }
               );
@@ -543,7 +427,6 @@ app.get(
         );
       });
     } catch (err) {
-      console.error("Google callback error:", err);
       return res.redirect(`${CLIENT_URL}/login?error=internal`);
     }
   }
@@ -698,4 +581,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
