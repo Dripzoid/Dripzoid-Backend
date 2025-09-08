@@ -398,67 +398,64 @@ app.get(
       const profile = req.user || {};
       const email = (profile.email || "").toLowerCase();
       const name = profile.name || "";
-
-      if (!email) {
-        return res.redirect(`${CLIENT_URL}/login?error=google_no_email`);
-      }
+      if (!email) return res.status(400).json({ error: "google_no_email" });
 
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-        if (err) return res.redirect(`${CLIENT_URL}/login?error=server`);
+        if (err) return res.status(500).json({ error: "server" });
 
-        const createSessionAndRedirect = (user, actionLabel) => {
+        const createSessionAndRespond = (user, actionLabel) => {
           db.run(
             "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
             [user.id, getDevice(req), getIP(req)],
             function (sessErr) {
-              if (sessErr) return res.redirect(`${CLIENT_URL}/login?error=session`);
+              if (sessErr) return res.status(500).json({ error: "session" });
               const sessionId = this.lastID;
-
               insertUserActivity(user.id, actionLabel, () => {});
 
+              // JWT (optional, can also skip and use only session cookie)
               const token = jwt.sign(
                 { id: Number(user.id), email: user.email, is_admin: Number(user.is_admin || 0) },
                 JWT_SECRET,
                 { expiresIn: "180d" }
               );
 
-              // ✅ Set cookies instead of dumping JSON
-              res.cookie("token", token, AUTH_COOKIE_OPTIONS);
-              res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
+              // Set HTTP-only cookie
+              res.cookie("session_id", sessionId, {
+                httpOnly: true,
+                secure: true,      // true if using HTTPS
+                sameSite: "none",  // cross-site if client/frontend domain differs
+                maxAge: 180 * 24 * 60 * 60 * 1000, // 180 days
+              });
 
-              // ✅ Redirect frontend with flag
+              // Redirect to frontend
               return res.redirect(`${CLIENT_URL}/login?oauth=1`);
             }
           );
         };
 
         if (row) {
-          return createSessionAndRedirect(row, "Logged In (Google)");
+          return createSessionAndRespond(row, "Logged In (Google)");
         }
 
-        // New Google user → register
+        // New user → register
         const randomPass = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(randomPass, 10);
-
         db.run(
           "INSERT INTO users (name, email, phone, password, gender, dob, is_admin) VALUES (?, ?, ?, ?, ?, ?, 0)",
           [name || null, email, null, hashedPassword, null, null],
           function (insErr) {
-            if (insErr) return res.redirect(`${CLIENT_URL}/login?error=create`);
-
+            if (insErr) return res.status(500).json({ error: "create" });
             const createdUserId = this.lastID;
             db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, newUserRow) => {
-              if (err2 || !newUserRow) {
-                return res.redirect(`${CLIENT_URL}/login?error=db`);
-              }
-              return createSessionAndRedirect(newUserRow, "Registered via Google");
+              if (err2 || !newUserRow) return res.status(500).json({ error: "db" });
+              return createSessionAndRespond(newUserRow, "Registered via Google");
             });
           }
         );
       });
     } catch (err) {
-      console.error("Google callback error:", err);
-      return res.redirect(`${CLIENT_URL}/login?error=internal`);
+      console.error(err);
+      return res.status(500).json({ error: "internal" });
     }
   }
 );
@@ -613,6 +610,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
