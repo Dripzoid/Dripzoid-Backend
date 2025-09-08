@@ -415,10 +415,12 @@ app.post("/api/request-password-reset", (req, res) => {
 // Reset password using OTP
 app.post("/api/reset-password", async (req, res) => {
   try {
-    const { email, otp, password } = req.body;
-    if (!email || !otp || !password) return res.status(400).json({ message: "Email, OTP and new password required" });
+    const { email, password } = req.body;
+    if (!email || !password) 
+      return res.status(400).json({ message: "Email and new password required" });
 
     const normalizedEmail = String(email).toLowerCase();
+    
     db.get("SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail], async (err, row) => {
       if (err) {
         console.error("reset-password db error:", err);
@@ -426,28 +428,20 @@ app.post("/api/reset-password", async (req, res) => {
       }
       if (!row) return res.status(404).json({ message: "User not found" });
 
-      if (!row.otp_hash || !row.otp_created_at) {
-        return res.status(400).json({ message: "No OTP requested" });
-      }
-
-      const otpHash = crypto.createHash("sha256").update(String(otp)).digest("hex");
-      const ageSec = (Date.now() - Number(row.otp_created_at)) / 1000;
-      const otpTTL = 60 * 5; // 5 minutes
-
-      if (otpHash !== row.otp_hash || ageSec > otpTTL) {
-        return res.status(400).json({ message: "Invalid or expired OTP" });
-      }
-
       const newHashed = await bcrypt.hash(password, 10);
-      db.run("UPDATE users SET password = ?, otp_hash = NULL, otp_created_at = NULL WHERE id = ?", [newHashed, row.id], function (updErr) {
-        if (updErr) {
-          console.error("reset-password update error:", updErr);
-          return res.status(500).json({ message: "Failed to update password" });
-        }
+      db.run(
+        "UPDATE users SET password = ? WHERE id = ?",
+        [newHashed, row.id],
+        function (updErr) {
+          if (updErr) {
+            console.error("reset-password update error:", updErr);
+            return res.status(500).json({ message: "Failed to update password" });
+          }
 
-        insertUserActivity(row.id, "Password Reset", () => {});
-        return res.json({ message: "Password updated" });
-      });
+          insertUserActivity(row.id, "Password Reset", () => {});
+          return res.json({ message: "Password updated" });
+        }
+      );
     });
   } catch (err) {
     console.error("reset-password error:", err);
@@ -704,3 +698,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
