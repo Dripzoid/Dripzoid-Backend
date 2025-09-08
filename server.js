@@ -413,19 +413,19 @@ app.get(
               insertUserActivity(user.id, actionLabel, () => {});
 
               // JWT (optional, can also skip and use only session cookie)
-              const token = jwt.sign(
-                { id: Number(user.id), email: user.email, is_admin: Number(user.is_admin || 0) },
-                JWT_SECRET,
-                { expiresIn: "180d" }
-              );
+              res.cookie("token", token, {
+  httpOnly: true,
+  secure: true,      // true if using HTTPS
+  sameSite: "none",  // cross-site if frontend domain differs
+  maxAge: 180 * 24 * 60 * 60 * 1000, // 180 days
+});
+res.cookie("session_id", sessionId, {
+  httpOnly: true,
+  secure: true,
+  sameSite: "none",
+  maxAge: 180 * 24 * 60 * 60 * 1000,
+});
 
-              // Set HTTP-only cookie
-              res.cookie("session_id", sessionId, {
-                httpOnly: true,
-                secure: true,      // true if using HTTPS
-                sameSite: "none",  // cross-site if client/frontend domain differs
-                maxAge: 180 * 24 * 60 * 60 * 1000, // 180 days
-              });
 
               // Redirect to frontend
               return res.redirect(`${CLIENT_URL}/login?oauth=1`);
@@ -632,6 +632,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
