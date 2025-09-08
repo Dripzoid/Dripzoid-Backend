@@ -14,7 +14,7 @@ const router = express.Router();
 
 // SQLite connection
 const db = new sqlite3.Database(
-  path.resolve(__dirname, "../dripzoid.db"),
+  path.resolve(__dirname, "./dripzoid.db"),
   (err) => {
     if (err) {
       console.error("❌ SQLite connection error:", err.message);
@@ -390,3 +390,4 @@ router.get("/:id", (req, res) => {
 });
 
 export default router;
+
