@@ -399,7 +399,7 @@ app.get(
         const randomPass = crypto.randomBytes(16).toString("hex");
         const hashedPassword = await bcrypt.hash(randomPass, 10);
         db.run(
-          "INSERT INTO users (name, email, phone, password, gender, dob, verified, is_admin) VALUES (?, ?, ?, ?, ?, ?, 1, 0)",
+          "INSERT INTO users (name, email, phone, password, gender, dob, is_admin) VALUES (?, ?, ?, ?, ?, ?, 0)",
           [name || null, email, null, hashedPassword, null, null],
           function (insErr) {
             if (insErr) return res.redirect(`${CLIENT_URL}/login?error=create`);
@@ -581,6 +581,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
