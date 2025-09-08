@@ -23,7 +23,7 @@ import { auth } from "./auth.js";
 import adminStatsRoutes from "./adminStats.js";
 import orderRoutes from "./orderRoutes.js";
 import uploadRoutes from "./uploadRoutes.js";
-import featuredRoutes from "./featured.js";
+import featuredRoutes from "./featuredRoutes.js";
 import userOrdersRoutes from "./userOrders.js";
 import addressRoutes from "./address.js";
 import paymentsRouter from "./payments.js";
@@ -581,5 +581,6 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
