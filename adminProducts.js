@@ -88,9 +88,9 @@ router.get("/", (req, res) => {
       params.push(lowStockThreshold);
     }
 
-    // SELECT clause (include sold fallback)
+    // SELECT clause (include sold fallback and colors)
     const selectSQL = `
-      SELECT id, name, category, subcategory, price, images, stock, rating, updated_at, COALESCE(sold,0) AS sold
+      SELECT id, name, category, subcategory, price, images, colors, stock, rating, updated_at, COALESCE(sold,0) AS sold
       FROM products
       ${whereSQL}
       ORDER BY ${orderClause}
@@ -143,12 +143,16 @@ router.post("/", (req, res) => {
       images,
       rating,
       sizes,
-      color,
+      colors, // prefer plural
+      color,  // accept legacy singular if provided
       originalPrice,
       description,
       subcategory,
       stock,
     } = req.body;
+
+    // backward-compatible: accept either 'colors' or 'color'
+    colors = (colors || color || "").toString();
 
     if (!name || !category || price == null) {
       return res.status(400).json({ message: "Name, category, and price are required" });
@@ -161,7 +165,7 @@ router.post("/", (req, res) => {
 
     db.run(
       `INSERT INTO products 
-        (name, category, price, images, rating, sizes, color, originalPrice, description, subcategory, stock, updated_at)
+        (name, category, price, images, rating, sizes, colors, originalPrice, description, subcategory, stock, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
       [
         name.trim(),
@@ -170,7 +174,7 @@ router.post("/", (req, res) => {
         images || "",
         rating,
         sizes || "",
-        color || "",
+        colors || "",
         originalPrice,
         description || "",
         subcategory || "",
@@ -209,12 +213,16 @@ router.put("/:id", (req, res) => {
       images,
       rating,
       sizes,
-      color,
+      colors, // prefer plural
+      color,  // accept legacy singular if provided
       originalPrice,
       description,
       subcategory,
       stock,
     } = req.body;
+
+    // backward-compatible: accept either 'colors' or 'color'
+    colors = (colors || color || "").toString();
 
     price = Number(price) || 0;
     rating = Number(rating) || 0;
@@ -223,7 +231,7 @@ router.put("/:id", (req, res) => {
 
     db.run(
       `UPDATE products
-       SET name = ?, category = ?, price = ?, images = ?, rating = ?, sizes = ?, color = ?, originalPrice = ?, description = ?, subcategory = ?, stock = ?, updated_at = datetime('now')
+       SET name = ?, category = ?, price = ?, images = ?, rating = ?, sizes = ?, colors = ?, originalPrice = ?, description = ?, subcategory = ?, stock = ?, updated_at = datetime('now')
        WHERE id = ?`,
       [
         (name || "").trim(),
@@ -232,7 +240,7 @@ router.put("/:id", (req, res) => {
         images || "",
         rating,
         sizes || "",
-        color || "",
+        colors || "",
         originalPrice,
         description || "",
         subcategory || "",
@@ -301,7 +309,8 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         images: row.images || "",
         rating: Number(row.rating) || 0,
         sizes: row.sizes || "",
-        color: row.color || "",
+        // Accept both 'colors' and legacy 'color' column names in CSV
+        colors: row.colors || row.color || "",
         originalPrice: Number(row.originalPrice) || 0,
         description: row.description || "",
         subcategory: row.subcategory || "",
@@ -319,7 +328,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         db.run("BEGIN TRANSACTION");
         const stmt = db.prepare(
           `INSERT INTO products 
-            (name, category, price, images, rating, sizes, color, originalPrice, description, subcategory, stock, updated_at)
+            (name, category, price, images, rating, sizes, colors, originalPrice, description, subcategory, stock, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
         );
 
@@ -331,7 +340,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
             p.images,
             p.rating,
             p.sizes,
-            p.color,
+            p.colors,
             p.originalPrice,
             p.description,
             p.subcategory,
@@ -390,4 +399,3 @@ router.get("/:id", (req, res) => {
 });
 
 export default router;
-
