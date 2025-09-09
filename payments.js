@@ -2,6 +2,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import Razorpay from "razorpay";
 import Razorpay from "razorpay";   // <-- added
 import db from "./db.js";
 
@@ -403,5 +404,6 @@ router.patch("/normalize", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
