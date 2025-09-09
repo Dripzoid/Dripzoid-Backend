@@ -76,7 +76,7 @@ db.run(
     user_id INTEGER,
     items_json TEXT,
     shipping_json TEXT,
-    amount REAL,
+    total_amount REAL,
     status TEXT,
     razorpay_order_id TEXT,
     razorpay_amount INTEGER,
@@ -466,5 +466,6 @@ router.patch("/normalize", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
