@@ -193,10 +193,14 @@ function authenticateToken(req, res, next) {
 
     jwt.verify(token, JWT_SECRET, (err, payload) => {
       if (err) return res.status(403).json({ message: "Invalid or expired token" });
-      req.user = payload;
+      // Attach useful values for downstream handlers
+      req.user = payload;               // payload contains id, email, is_admin and (when issued) sessionId
+      req.token = token;                // raw token
+      req.sessionId = payload?.sessionId ?? req.cookies?.sessionId ?? null;
       next();
     });
   } catch (err) {
+    console.error("authenticateToken error:", err);
     return res.status(500).json({ message: "Authentication error" });
   }
 }
@@ -211,14 +215,9 @@ passport.use(
       callbackURL: `${API_BASE.replace(/\/$/, "")}/api/auth/google/callback`,
       passReqToCallback: true,
     },
+    // pass the raw profile through so the callback handler can inspect full profile
     (req, accessToken, refreshToken, profile, done) => {
-      const user = {
-        googleId: profile.id,
-        name: profile.displayName || "",
-        email: profile.emails?.[0]?.value || null,
-        avatar: profile.photos?.[0]?.value || null,
-      };
-      done(null, user);
+      done(null, profile);
     }
   )
 );
@@ -227,14 +226,17 @@ passport.use(
 app.use("/api", otpRoutes);
 
 // -------------------- Token helper --------------------
-function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success") {
+// issueTokenAndRespond: sets cookies and returns JSON OR redirects (if options.redirect provided)
+function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success", options = {}) {
   try {
     const id = Number(userRow.id);
     const email = (userRow.email || "").toLowerCase();
     const is_admin = Number(userRow.is_admin || 0);
 
-    const token = jwt.sign({ id, email, is_admin }, JWT_SECRET, { expiresIn: "180d" });
+    // always include sessionId in JWT so authenticateToken can use it
+    const token = jwt.sign({ id, email, is_admin, sessionId }, JWT_SECRET, { expiresIn: "180d" });
 
+    // set cookies (token + sessionId) — frontend will still call /api/auth/me to get user object if needed
     try {
       res.cookie("token", token, AUTH_COOKIE_OPTIONS);
       res.cookie("sessionId", String(sessionId), AUTH_COOKIE_OPTIONS);
@@ -253,6 +255,11 @@ function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success")
     };
     if (userRow.created_at) userResp.created_at = userRow.created_at;
 
+    if (options && options.redirect) {
+      // redirect for OAuth flows (frontend will then hit /api/auth/me via credentials:include to get user+token)
+      return res.redirect(options.redirect);
+    }
+
     return res.json({ message, token, sessionId, user: userResp });
   } catch (err) {
     console.error("issueTokenAndRespond error:", err);
@@ -260,7 +267,8 @@ function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success")
   }
 }
 
-const createSessionAndRespond = (user, actionLabel) => {
+// createSessionAndRespond: used by OAuth callback — requires req & res
+function createSessionAndRespond(req, res, user, actionLabel) {
   db.run(
     "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
     [user.id, getDevice(req), getIP(req)],
@@ -273,36 +281,11 @@ const createSessionAndRespond = (user, actionLabel) => {
       const sessionId = this.lastID;
       insertUserActivity(user.id, actionLabel, () => {});
 
-      // Generate JWT
-      const token = jwt.sign(
-        {
-          id: Number(user.id),
-          email: user.email,
-          is_admin: Number(user.is_admin || 0),
-          sessionId,
-        },
-        JWT_SECRET,
-        { expiresIn: "180d" }
-      );
-
-      const cookieOptions = {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production", // only secure in prod
-        sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-        maxAge: 180 * 24 * 60 * 60 * 1000, // 180 days
-      };
-
-      // Set cookies
-      res.cookie("token", token, cookieOptions);
-      res.cookie("session_id", sessionId, cookieOptions);
-
-      // Redirect to frontend account page
-      return res.redirect(`${CLIENT_URL}/account?oauth=1`);
+      // Use issueTokenAndRespond but redirect back to frontend for OAuth flow
+      return issueTokenAndRespond(req, res, user, sessionId, actionLabel, { redirect: `${CLIENT_URL}/account?oauth=1` });
     }
   );
-};
-
-
+}
 
 // -------------------- Auth --------------------
 
@@ -375,6 +358,7 @@ app.post("/api/login", (req, res) => {
       );
     });
   } catch (err) {
+    console.error("Login error:", err);
     return res.status(500).json({ message: "Internal error" });
   }
 });
@@ -398,10 +382,10 @@ app.post("/api/reset-password", async (req, res) => {
       });
     });
   } catch (err) {
+    console.error("Reset-password error:", err);
     return res.status(500).json({ message: "Internal error" });
   }
 });
-
 
 // -------------------- Google OAuth --------------------
 
@@ -414,9 +398,10 @@ app.get(
   passport.authenticate("google", { failureRedirect: `${CLIENT_URL}/login`, session: false }),
   async (req, res) => {
     try {
+      // passport returned the raw profile (we configured verify to forward profile)
       const profile = req.user || {};
 
-      // Robust email extraction
+      // Robust email extraction (works with profile object or simpler objects)
       const email =
         (
           (profile.email && String(profile.email)) ||
@@ -427,55 +412,14 @@ app.get(
 
       const name =
         profile.displayName ||
-        (profile.name &&
-          `${profile.name.givenName || ""} ${profile.name.familyName || ""}`.trim()) ||
-        "";
+        (profile.name && `${profile.name.givenName || ""} ${profile.name.familyName || ""}`.trim()) ||
+        profile._json?.name ||
+        "Google User";
 
       if (!email) {
         console.error("Google login failed: no email in profile");
         return res.status(400).json({ error: "google_no_email" });
       }
-
-      // Common session creation helper
-      const createSessionAndRespond = (user, actionLabel) => {
-        db.run(
-          "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-          [user.id, getDevice(req), getIP(req)],
-          function (sessErr) {
-            if (sessErr) {
-              console.error("DB session insert error:", sessErr);
-              return res.status(500).json({ error: "session" });
-            }
-
-            const sessionId = this.lastID;
-            insertUserActivity(user.id, actionLabel, () => {});
-
-            // Generate token
-            const token = jwt.sign(
-              {
-                id: Number(user.id),
-                email: user.email,
-                is_admin: Number(user.is_admin || 0),
-                sessionId,
-              },
-              JWT_SECRET,
-              { expiresIn: "180d" }
-            );
-
-            const cookieOptions = {
-              httpOnly: true,
-              secure: isProduction,
-              sameSite: isProduction ? "none" : "lax",
-              maxAge: 180 * 24 * 60 * 60 * 1000, // 180 days
-            };
-
-            res.cookie("token", token, cookieOptions);
-            res.cookie("session_id", sessionId, cookieOptions);
-
-            return res.redirect(`${CLIENT_URL}/account?oauth=1`);
-          }
-        );
-      };
 
       // Check if user exists
       db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
@@ -485,11 +429,11 @@ app.get(
         }
 
         if (row) {
-          // Existing user
-          return createSessionAndRespond(row, "Logged In (Google)");
+          // Existing user — create session & redirect
+          return createSessionAndRespond(req, res, row, "Logged In (Google)");
         }
 
-        // New user → create one
+        // New user → create one (ensure name saved)
         try {
           const randomPass = crypto.randomBytes(16).toString("hex");
           const hashedPassword = await bcrypt.hash(randomPass, 10);
@@ -509,7 +453,7 @@ app.get(
                   console.error("DB select after insert error:", err2);
                   return res.status(500).json({ error: "db" });
                 }
-                return createSessionAndRespond(newUserRow, "Registered via Google");
+                return createSessionAndRespond(req, res, newUserRow, "Registered via Google");
               });
             }
           );
@@ -527,8 +471,8 @@ app.get(
 
 // -------------------- Signout and session management --------------------
 
-// Logout current session (uses sessionId cookie or token)
-app.post("/api/logout", authenticateToken, (req, res) => {
+// Changed route: /api/signout-session (was /api/logout)
+app.post("/api/signout-session", authenticateToken, (req, res) => {
   try {
     const userId = Number(req.user?.id);
     const cookieSessionId = req.cookies?.sessionId;
@@ -536,7 +480,7 @@ app.post("/api/logout", authenticateToken, (req, res) => {
 
     if (cookieSessionId) {
       db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [cookieSessionId, userId], function (err) {
-        if (err) console.error("Logout delete session error:", err);
+        if (err) console.error("Signout delete session error:", err);
         // clear cookies regardless
         try {
           res.clearCookie("token", AUTH_COOKIE_OPTIONS);
@@ -544,22 +488,35 @@ app.post("/api/logout", authenticateToken, (req, res) => {
         } catch (e) {
           /* ignore cookie clear errors */
         }
-        return res.json({ message: "Logged out" });
+        return res.json({ message: "Signed out" });
       });
     } else {
-      // fallback: delete any one session for user (best-effort)
-      db.run("DELETE FROM user_sessions WHERE user_id = ? LIMIT 1", [userId], function (err) {
-        if (err) console.error("Logout delete fallback session error:", err);
-        try {
-          res.clearCookie("token", AUTH_COOKIE_OPTIONS);
-          res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
-        } catch (e) {}
-        return res.json({ message: "Logged out" });
+      // fallback: delete one session for user (best-effort)
+      // safer: select one session id then delete it
+      db.get("SELECT id FROM user_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1", [userId], (selErr, selRow) => {
+        if (selErr) console.error("Signout fallback select error:", selErr);
+        const delId = selRow?.id ?? null;
+        if (delId) {
+          db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [delId, userId], function (err) {
+            if (err) console.error("Signout delete fallback session error:", err);
+            try {
+              res.clearCookie("token", AUTH_COOKIE_OPTIONS);
+              res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
+            } catch (e) {}
+            return res.json({ message: "Signed out" });
+          });
+        } else {
+          try {
+            res.clearCookie("token", AUTH_COOKIE_OPTIONS);
+            res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
+          } catch (e) {}
+          return res.json({ message: "Signed out" });
+        }
       });
     }
   } catch (err) {
-    console.error("Logout error:", err);
-    return res.status(500).json({ message: "Logout failed" });
+    console.error("Signout error:", err);
+    return res.status(500).json({ message: "Signout failed" });
   }
 });
 
@@ -640,8 +597,8 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
 
         return res.json({
           user: row,
-          token: req.token || null,        // <-- send back token
-          sessionId: req.sessionId || null // <-- send back sessionId
+          token: req.token || null,
+          sessionId: req.sessionId || null,
         });
       }
     );
@@ -650,8 +607,6 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 });
-
-
 
 // -------------------- Mount Other Routes --------------------
 app.use("/api/wishlist", wishlistRoutes);
@@ -705,15 +660,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
-
-
-
-
-
-
-
-
-
-
-
-
