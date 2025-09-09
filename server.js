@@ -472,7 +472,7 @@ app.get(
 // -------------------- Signout and session management --------------------
 
 // Changed route: /api/signout-session (was /api/logout)
-app.post("/api/signout-session", authenticateToken, (req, res) => {
+app.post("/api/account/signout-session", authenticateToken, (req, res) => {
   try {
     const userId = Number(req.user?.id);
     const cookieSessionId = req.cookies?.sessionId;
@@ -660,3 +660,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
