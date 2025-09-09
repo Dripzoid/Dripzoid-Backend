@@ -111,7 +111,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     // 1) Create internal order (status = pending)
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO orders (user_id, items_json, shipping_json, amount, status)
+        `INSERT INTO orders (user_id, items_json, shipping_json, total_amount, status)
          VALUES (?, ?, ?, ?, ?)`,
         [req.user.id, JSON.stringify(items), JSON.stringify(shipping || {}), totalAmtNumber, "pending"],
         function (err) {
@@ -466,4 +466,5 @@ router.patch("/normalize", auth, async (req, res) => {
 });
 
 export default router;
+
 
