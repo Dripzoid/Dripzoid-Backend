@@ -41,6 +41,7 @@ const __dirname = path.dirname(__filename);
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 const API_BASE = process.env.API_BASE || "http://localhost:5000";
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
+const isProduction = process.env.NODE_ENV === 'production';
 
 const app = express();
 
@@ -396,38 +397,62 @@ app.get(
   async (req, res) => {
     try {
       const profile = req.user || {};
-      const email = (profile.email || "").toLowerCase();
-      const name = profile.name || "";
+
+      // robust email extraction (handles different passport profile shapes)
+      const email =
+        (
+          (profile.email && String(profile.email)) ||
+          (profile.emails && profile.emails[0] && profile.emails[0].value) ||
+          (profile._json && profile._json.email) ||
+          ""
+        ).toLowerCase().trim();
+
+      const name =
+        profile.displayName ||
+        (profile.name && `${profile.name.givenName || ""} ${profile.name.familyName || ""}`.trim()) ||
+        "";
+
       if (!email) return res.status(400).json({ error: "google_no_email" });
 
-      db.get("SELECT * FROM users WHERE lower(email) = ?", [email], async (err, row) => {
-        if (err) return res.status(500).json({ error: "server" });
+      db.get("SELECT * FROM users WHERE lower(email) = ?", [email], (err, row) => {
+        if (err) {
+          console.error("DB lookup error (google callback):", err);
+          return res.status(500).json({ error: "server" });
+        }
 
         const createSessionAndRespond = (user, actionLabel) => {
           db.run(
             "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
             [user.id, getDevice(req), getIP(req)],
             function (sessErr) {
-              if (sessErr) return res.status(500).json({ error: "session" });
+              if (sessErr) {
+                console.error("DB session insert error:", sessErr);
+                return res.status(500).json({ error: "session" });
+              }
+
               const sessionId = this.lastID;
+              // fire-and-forget activity log
               insertUserActivity(user.id, actionLabel, () => {});
 
-              // JWT (optional, can also skip and use only session cookie)
-              res.cookie("token", token, {
-  httpOnly: true,
-  secure: true,      // true if using HTTPS
-  sameSite: "none",  // cross-site if frontend domain differs
-  maxAge: 180 * 24 * 60 * 60 * 1000, // 180 days
-});
-res.cookie("session_id", sessionId, {
-  httpOnly: true,
-  secure: true,
-  sameSite: "none",
-  maxAge: 180 * 24 * 60 * 60 * 1000,
-});
+              // Create token: prefer JWT if configured; otherwise fallback to random token (replace in prod)
+              let token;
+              if (process.env.JWT_SECRET) {
+                token = jwt.sign({ id: user.id, sessionId }, process.env.JWT_SECRET, { expiresIn: "180d" });
+              } else {
+                token = crypto.randomBytes(32).toString("hex"); // fallback — not ideal for auth in production
+              }
 
+              const cookieOptions = {
+                httpOnly: true,
+                secure: isProduction,                   // secure cookies on HTTPS in production
+                sameSite: isProduction ? "none" : "lax", // 'none' required for cross-site cookies (with secure)
+                maxAge: 180 * 24 * 60 * 60 * 1000,     // 180 days
+              };
 
-              // Redirect to frontend
+              // If your frontend is on a sibling domain (e.g. app.dripzoid.com), you may also set `domain` here.
+              res.cookie("token", token, cookieOptions);
+              res.cookie("session_id", sessionId, cookieOptions);
+
               return res.redirect(`${CLIENT_URL}/login?oauth=1`);
             }
           );
@@ -437,29 +462,43 @@ res.cookie("session_id", sessionId, {
           return createSessionAndRespond(row, "Logged In (Google)");
         }
 
-        // New user → register
-        const randomPass = crypto.randomBytes(16).toString("hex");
-        const hashedPassword = await bcrypt.hash(randomPass, 10);
-        db.run(
-          "INSERT INTO users (name, email, phone, password, gender, dob, is_admin) VALUES (?, ?, ?, ?, ?, ?, 0)",
-          [name || null, email, null, hashedPassword, null, null],
-          function (insErr) {
-            if (insErr) return res.status(500).json({ error: "create" });
-            const createdUserId = this.lastID;
-            db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, newUserRow) => {
-              if (err2 || !newUserRow) return res.status(500).json({ error: "db" });
-              return createSessionAndRespond(newUserRow, "Registered via Google");
-            });
+        // New user -> create account
+        (async () => {
+          try {
+            const randomPass = crypto.randomBytes(16).toString("hex");
+            const hashedPassword = await bcrypt.hash(randomPass, 10);
+
+            db.run(
+              "INSERT INTO users (name, email, phone, password, gender, dob, is_admin) VALUES (?, ?, ?, ?, ?, ?, 0)",
+              [name || null, email, null, hashedPassword, null, null],
+              function (insErr) {
+                if (insErr) {
+                  console.error("DB user insert error:", insErr);
+                  return res.status(500).json({ error: "create" });
+                }
+
+                const createdUserId = this.lastID;
+                db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, newUserRow) => {
+                  if (err2 || !newUserRow) {
+                    console.error("DB select after insert error:", err2);
+                    return res.status(500).json({ error: "db" });
+                  }
+                  return createSessionAndRespond(newUserRow, "Registered via Google");
+                });
+              }
+            );
+          } catch (hashErr) {
+            console.error("Hashing error:", hashErr);
+            return res.status(500).json({ error: "internal" });
           }
-        );
+        })();
       });
     } catch (err) {
-      console.error(err);
+      console.error("Unhandled error in google callback:", err);
       return res.status(500).json({ error: "internal" });
     }
   }
 );
-
 
 // -------------------- Signout and session management --------------------
 
@@ -632,6 +671,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
