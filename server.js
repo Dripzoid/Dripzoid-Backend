@@ -628,20 +628,29 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
     const userId = Number(req.user?.id);
     if (!userId) return res.status(401).json({ message: "Not authenticated" });
 
-    db.get("SELECT id, name, email, phone, gender, dob, is_admin, created_at FROM users WHERE id = ?", [userId], (err, row) => {
-      if (err) {
-        console.error("GET /api/auth/me DB error:", err);
-        return res.status(500).json({ message: "Failed to fetch user" });
-      }
-      if (!row) return res.status(404).json({ message: "User not found" });
+    db.get(
+      "SELECT id, name, email, phone, gender, dob, is_admin, created_at FROM users WHERE id = ?",
+      [userId],
+      (err, row) => {
+        if (err) {
+          console.error("GET /api/auth/me DB error:", err);
+          return res.status(500).json({ message: "Failed to fetch user" });
+        }
+        if (!row) return res.status(404).json({ message: "User not found" });
 
-      return res.json({ user: row });
-    });
+        return res.json({
+          user: row,
+          token: req.token || null,        // <-- send back token
+          sessionId: req.sessionId || null // <-- send back sessionId
+        });
+      }
+    );
   } catch (err) {
     console.error("GET /api/auth/me error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 
 // -------------------- Mount Other Routes --------------------
@@ -696,6 +705,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
