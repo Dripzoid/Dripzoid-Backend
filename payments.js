@@ -111,7 +111,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     // 1) Create internal order (status = pending)
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO Orders (user_id, items_json, shipping_json, amount, status)
+        `INSERT INTO orders (user_id, items_json, shipping_json, amount, status)
          VALUES (?, ?, ?, ?, ?)`,
         [req.user.id, JSON.stringify(items), JSON.stringify(shipping || {}), totalAmtNumber, "pending"],
         function (err) {
@@ -134,7 +134,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     // 3) Update internal order with razorpay order id & amount in paise
     await new Promise((resolve, reject) => {
       db.run(
-        `UPDATE Orders SET razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        `UPDATE orders SET razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         [razorOrder.id, razorOrder.amount, orderResult.id],
         function (err) {
           if (err) return reject(err);
@@ -177,7 +177,7 @@ router.post("/razorpay/verify", auth, async (req, res) => {
     // Mark order as paid (only if it belongs to the user)
     await new Promise((resolve, reject) => {
       db.run(
-        `UPDATE Orders
+        `UPDATE orders
          SET status = ?, razorpay_payment_id = ?, razorpay_order_id = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ? AND user_id = ?`,
         ["paid", razorpay_payment_id, razorpay_order_id, internalOrderId, req.user.id],
@@ -466,3 +466,4 @@ router.patch("/normalize", auth, async (req, res) => {
 });
 
 export default router;
+
