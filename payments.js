@@ -3,43 +3,91 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import Razorpay from "razorpay";
-import Razorpay from "razorpay";   // <-- added
 import db from "./db.js";
 
 const router = express.Router();
 
 // --- Encryption helpers ---
+// Make sure ENC_KEY is 32 bytes and IV is 16 bytes in production through env vars.
 const ENC_KEY = process.env.ENC_KEY || "12345678901234567890123456789012"; // 32 chars
 const IV = process.env.IV || "1234567890123456"; // 16 chars
 
 function encrypt(text) {
-  const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(ENC_KEY), IV);
+  const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(ENC_KEY), Buffer.from(IV));
   let encrypted = cipher.update(text, "utf8", "hex");
   encrypted += cipher.final("hex");
   return encrypted;
 }
 
 function decrypt(text) {
-  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(ENC_KEY), IV);
+  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(ENC_KEY), Buffer.from(IV));
   let decrypted = decipher.update(text, "hex", "utf8");
   decrypted += decipher.final("utf8");
   return decrypted;
 }
 
 // --- Validation helpers ---
-function luhnCheck(num) { /* unchanged */ }
+function luhnCheck(num) {
+  // remove non-digits
+  const digits = (num + "").replace(/\D/g, "");
+  if (!/^\d+$/.test(digits)) return false;
+  const arr = digits.split("").reverse().map(x => parseInt(x, 10));
+  const sum = arr.reduce((acc, val, idx) => {
+    if (idx % 2) {
+      val *= 2;
+      if (val > 9) val -= 9;
+    }
+    return acc + val;
+  }, 0);
+  return sum % 10 === 0;
+}
+
 const expiryRegex = /^(0[1-9]|1[0-2])\/\d{2}$/;
 const upiRegex = /^[\w.\-]{2,256}@[a-zA-Z]{2,64}$/;
 const ifscRegex = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 
 // --- Middleware: Auth ---
-function auth(req, res, next) { /* unchanged */ }
+function auth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+  if (!token) return res.status(401).json({ error: "No token" });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "secret");
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
 
 // ---------------- RAZORPAY CONFIG ----------------
+if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+  console.warn("Warning: RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set in env. Razorpay endpoints will fail until set.");
+}
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
+
+// Ensure Orders table exists (helpful if not created)
+db.run(
+  `CREATE TABLE IF NOT EXISTS Orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    items_json TEXT,
+    shipping_json TEXT,
+    amount REAL,
+    status TEXT,
+    razorpay_order_id TEXT,
+    razorpay_amount INTEGER,
+    razorpay_payment_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  (err) => {
+    if (err) console.error("Failed to ensure Orders table:", err);
+  }
+);
 
 // ---------------- RAZORPAY ENDPOINTS ----------------
 
@@ -47,27 +95,25 @@ const razorpay = new Razorpay({
 router.post("/razorpay/create-order", auth, async (req, res) => {
   try {
     const { items, shipping, totalAmount } = req.body;
+
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "No items provided" });
     }
 
-    const amountPaise = Math.round(Number(totalAmount) * 100);
-    if (!amountPaise || amountPaise <= 0) {
-      return res.status(400).json({ error: "Invalid amount" });
+    const totalAmtNumber = Number(totalAmount);
+    if (!Number.isFinite(totalAmtNumber) || totalAmtNumber <= 0) {
+      return res.status(400).json({ error: "Invalid totalAmount" });
     }
 
-    // 1. Create internal order in DB
+    // Convert to paise for Razorpay
+    const amountPaise = Math.round(totalAmtNumber * 100);
+
+    // 1) Create internal order (status = pending)
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO Orders (user_id, items_json, shipping_json, amount, status)
          VALUES (?, ?, ?, ?, ?)`,
-        [
-          req.user.id,
-          JSON.stringify(items),
-          JSON.stringify(shipping || {}),
-          totalAmount,
-          "pending",
-        ],
+        [req.user.id, JSON.stringify(items), JSON.stringify(shipping || {}), totalAmtNumber, "pending"],
         function (err) {
           if (err) return reject(err);
           resolve({ id: this.lastID });
@@ -75,7 +121,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       );
     });
 
-    // 2. Create Razorpay order
+    // 2) Create Razorpay order
     const options = {
       amount: amountPaise,
       currency: "INR",
@@ -85,9 +131,21 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
 
     const razorOrder = await razorpay.orders.create(options);
 
+    // 3) Update internal order with razorpay order id & amount in paise
+    await new Promise((resolve, reject) => {
+      db.run(
+        `UPDATE Orders SET razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [razorOrder.id, razorOrder.amount, orderResult.id],
+        function (err) {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    });
+
     res.json({
       razorpayOrderId: razorOrder.id,
-      amount: razorOrder.amount,
+      amount: razorOrder.amount, // in paise
       currency: razorOrder.currency,
       internalOrderId: orderResult.id,
     });
@@ -105,28 +163,33 @@ router.post("/razorpay/verify", auth, async (req, res) => {
       return res.status(400).json({ error: "Missing fields" });
     }
 
+    // verify signature (HMAC SHA256 of order_id|payment_id using key_secret)
     const generatedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || "")
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
 
     if (generatedSignature !== razorpay_signature) {
+      console.warn("Razorpay signature mismatch", { generatedSignature, razorpay_signature });
       return res.status(400).json({ error: "Signature verification failed" });
     }
 
-    // Mark order as paid
+    // Mark order as paid (only if it belongs to the user)
     await new Promise((resolve, reject) => {
       db.run(
-        `UPDATE Orders SET status = ?, razorpay_payment_id = ?, razorpay_order_id = ?, updated_at = CURRENT_TIMESTAMP
+        `UPDATE Orders
+         SET status = ?, razorpay_payment_id = ?, razorpay_order_id = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ? AND user_id = ?`,
         ["paid", razorpay_payment_id, razorpay_order_id, internalOrderId, req.user.id],
         function (err) {
           if (err) return reject(err);
+          if (this.changes === 0) return reject(new Error("Order not found or not owned by user"));
           resolve();
         }
       );
     });
 
+    // Optionally you can fetch the order row and return details; for now return success
     res.json({ success: true, internalOrderId, razorpay_payment_id });
   } catch (err) {
     console.error("Razorpay verify error:", err);
@@ -317,7 +380,6 @@ router.patch("/:id/default", auth, (req, res) => {
 });
 
 // --- Normalize ---
-// We cannot derive last4/masked from encrypted values with SQL. Decrypt rows server-side and update.
 router.patch("/normalize", auth, async (req, res) => {
   try {
     const rows = await new Promise((resolve, reject) => {
@@ -404,6 +466,3 @@ router.patch("/normalize", auth, async (req, res) => {
 });
 
 export default router;
-
-
-
