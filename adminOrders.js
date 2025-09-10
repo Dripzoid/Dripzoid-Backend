@@ -133,32 +133,41 @@ function dbAll(sql, params = []) {
 // ------------------ Routes ------------------
 
 // GET /api/admin/orders/stats
-// GET /api/admin/orders/stats
 router.get("/stats", authMiddleware, async (req, res) => {
   try {
     const sql = `
       SELECT 
         COUNT(*) AS total_orders,
-        SUM(total_amount) AS total_revenue,
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_orders,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_orders,
-        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders
-      FROM orders
+        SUM(total_amount) AS total_sales,
+        SUM(CASE WHEN LOWER(status) = 'confirmed' THEN 1 ELSE 0 END) AS confirmed_orders,
+        SUM(CASE WHEN LOWER(status) = 'pending' THEN 1 ELSE 0 END) AS pending_orders,
+        SUM(CASE WHEN LOWER(status) = 'shipped' THEN 1 ELSE 0 END) AS shipped_orders,
+        SUM(CASE WHEN LOWER(status) = 'delivered' THEN 1 ELSE 0 END) AS delivered_orders,
+        SUM(CASE WHEN LOWER(status) = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders,
+        SUM(
+          (SELECT IFNULL(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id)
+        ) AS total_items_sold
+      FROM orders o
     `;
 
     const row = await dbGet(sql);
+
     res.json({
       totalOrders: row.total_orders || 0,
-      totalRevenue: row.total_revenue || 0,
-      pending: row.pending_orders || 0,
-      completed: row.completed_orders || 0,
-      cancelled: row.cancelled_orders || 0,
+      confirmedOrders: row.confirmed_orders || 0,
+      pendingOrders: row.pending_orders || 0,
+      shippedOrders: row.shipped_orders || 0,
+      deliveredOrders: row.delivered_orders || 0,
+      cancelledOrders: row.cancelled_orders || 0,
+      totalSales: row.total_sales || 0,
+      totalItemsSold: row.total_items_sold || 0,
     });
   } catch (err) {
     console.error("GET /stats error:", err);
     res.status(500).json({ message: "Internal server error", error: err.message });
   }
 });
+
 
 
 // GET /api/admin/orders/labels
@@ -439,4 +448,5 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
 
