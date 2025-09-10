@@ -183,20 +183,40 @@ function insertUserActivity(userId, action, cb) {
 }
 
 // -------------------- JWT Middleware --------------------
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET = process.env.JWT_SECRET || "secret";
+
 function authenticateToken(req, res, next) {
   try {
     let token = null;
-    const authHeader = req.headers["authorization"];
-    if (authHeader?.toLowerCase().startsWith("bearer ")) token = authHeader.split(" ")[1];
-    if (!token && req.cookies?.token) token = req.cookies.token;
-    if (!token) return res.status(401).json({ message: "No token provided" });
 
+    // 1. Check Authorization header
+    const authHeader = req.headers["authorization"];
+    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+      token = authHeader.split(" ")[1];
+    }
+
+    // 2. Check cookies if no header token
+    if (!token && req.cookies?.token) {
+      token = req.cookies.token;
+    }
+
+    if (!token) {
+      return res.status(401).json({ message: "No token provided" });
+    }
+
+    // 3. Verify token
     jwt.verify(token, JWT_SECRET, (err, payload) => {
-      if (err) return res.status(403).json({ message: "Invalid or expired token" });
-      // Attach useful values for downstream handlers
-      req.user = payload;               // payload contains id, email, is_admin and (when issued) sessionId
-      req.token = token;                // raw token
-      req.sessionId = payload?.sessionId ?? req.cookies?.sessionId ?? null;
+      if (err) {
+        return res.status(403).json({ message: "Invalid or expired token" });
+      }
+
+      // 4. Attach useful values for downstream routes
+      req.user = payload; // payload should include { id, email, is_admin, sessionId? }
+      req.token = token;
+      req.sessionId = payload?.sessionId || req.cookies?.sessionId || null;
+
       next();
     });
   } catch (err) {
@@ -204,6 +224,9 @@ function authenticateToken(req, res, next) {
     return res.status(500).json({ message: "Authentication error" });
   }
 }
+
+export default authenticateToken;
+
 
 // -------------------- Passport Google OAuth --------------------
 app.use(passport.initialize());
@@ -668,5 +691,6 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
