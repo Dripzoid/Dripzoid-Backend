@@ -79,6 +79,16 @@ db.run(
   )`
 );
 
+db.run(
+  `CREATE TABLE IF NOT EXISTS user_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    action TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`
+);
+
 // ---------------- CREATE RAZORPAY ORDER ----------------
 router.post("/razorpay/create-order", auth, async (req, res) => {
   try {
@@ -98,9 +108,9 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     // 1️⃣ Insert order
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO orders (user_id, shipping_json, total_amount, status)
+        `INSERT INTO orders (user_id, shipping_json, total_amount, status) 
          VALUES (?, ?, ?, ?)`,
-        [req.user.id, JSON.stringify(shipping || {}), totalAmtNumber, "confirmed"],
+        [req.user.id, JSON.stringify(shipping || {}), totalAmtNumber, "Confirmed"],
         function (err) {
           if (err) return reject(err);
           resolve({ id: this.lastID });
@@ -114,7 +124,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       const quantity = Number(item.quantity || 1);
       await new Promise((resolve, reject) => {
         db.run(
-          `INSERT INTO order_items (order_id, product_id, quantity, unit_price, price)
+          `INSERT INTO order_items (order_id, product_id, quantity, unit_price, price) 
            VALUES (?, ?, ?, ?, ?)`,
           [orderResult.id, item.product_id, quantity, unitPrice, unitPrice * quantity],
           function (err) {
@@ -138,6 +148,18 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       db.run(
         `UPDATE orders SET razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         [razorOrder.id, razorOrder.amount, orderResult.id],
+        function (err) {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    });
+
+    // 5️⃣ Insert user activity (Placed order)
+    await new Promise((resolve, reject) => {
+      db.run(
+        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
+        [req.user.id, `Placed order #${orderResult.id}`],
         function (err) {
           if (err) return reject(err);
           resolve();
@@ -178,13 +200,25 @@ router.post("/razorpay/verify", auth, async (req, res) => {
     // Update order status to paid
     await new Promise((resolve, reject) => {
       db.run(
-        `UPDATE orders
-         SET status = ?, razorpay_payment_id = ?, updated_at = CURRENT_TIMESTAMP
+        `UPDATE orders 
+         SET status = ?, razorpay_payment_id = ?, updated_at = CURRENT_TIMESTAMP 
          WHERE id = ? AND user_id = ?`,
         ["paid", razorpay_payment_id, internalOrderId, req.user.id],
         function (err) {
           if (err) return reject(err);
           if (this.changes === 0) return reject(new Error("Order not found or not owned by user"));
+          resolve();
+        }
+      );
+    });
+
+    // Insert user activity (Payment successful)
+    await new Promise((resolve, reject) => {
+      db.run(
+        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
+        [req.user.id, `Payment successful for order #${internalOrderId}`],
+        function (err) {
+          if (err) return reject(err);
           resolve();
         }
       );
