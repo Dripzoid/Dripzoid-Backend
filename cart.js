@@ -26,16 +26,16 @@ function authenticateToken(req, res, next) {
 
 /**
  * GET /api/cart
- * Returns cart items with product details and explicit product_id
+ * Returns cart items with product details
  */
 router.get("/", authenticateToken, (req, res) => {
   const sql = `
     SELECT 
       cart_items.id AS cart_id,
-      cart_items.product_id,      -- ✅ Ensures product_id is sent to frontend
+      cart_items.product_id,
       cart_items.quantity, 
-      cart_items.size, 
-      cart_items.color,
+      cart_items.size AS selectedSize,     -- ✅ renamed
+      cart_items.color AS selectedColor,   -- ✅ renamed
       products.name, 
       products.price, 
       products.images,
@@ -56,7 +56,13 @@ router.get("/", authenticateToken, (req, res) => {
  * Adds an item to the cart — validates product exists first
  */
 router.post("/", authenticateToken, (req, res) => {
-  const { product_id, quantity = 1, size = null, color = null } = req.body;
+  const {
+    product_id,
+    quantity = 1,
+    selectedSize = null,
+    selectedColor = null,
+  } = req.body;
+
   if (!product_id) {
     return res.status(400).json({ error: "Missing product_id" });
   }
@@ -71,7 +77,7 @@ router.post("/", authenticateToken, (req, res) => {
     db.run(
       `INSERT INTO cart_items (user_id, product_id, size, color, quantity)
        VALUES (?, ?, ?, ?, ?)`,
-      [req.user.id, product_id, size, color, quantity],
+      [req.user.id, product_id, selectedSize, selectedColor, quantity],
       function (insertErr) {
         if (insertErr) return res.status(500).json({ error: insertErr.message });
         res.json({ id: this.lastID });
@@ -112,4 +118,3 @@ router.delete("/:id", authenticateToken, (req, res) => {
 });
 
 export default router;
-
