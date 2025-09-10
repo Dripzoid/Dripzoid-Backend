@@ -133,24 +133,33 @@ function dbAll(sql, params = []) {
 // ------------------ Routes ------------------
 
 // GET /api/admin/orders/stats
+// GET /api/admin/orders/stats
 router.get("/stats", authMiddleware, async (req, res) => {
   try {
     const sql = `
       SELECT 
         COUNT(*) AS total_orders,
+        SUM(total_amount) AS total_revenue,
         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_orders,
         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_orders,
-        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders,
-        SUM(total_amount) AS total_revenue
+        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders
       FROM orders
     `;
-    const stats = await dbGet(sql);
-    res.json(stats);
+
+    const row = await dbGet(sql);
+    res.json({
+      totalOrders: row.total_orders || 0,
+      totalRevenue: row.total_revenue || 0,
+      pending: row.pending_orders || 0,
+      completed: row.completed_orders || 0,
+      cancelled: row.cancelled_orders || 0,
+    });
   } catch (err) {
     console.error("GET /stats error:", err);
     res.status(500).json({ message: "Internal server error", error: err.message });
   }
 });
+
 
 // GET /api/admin/orders/labels
 router.get("/labels", authMiddleware, async (req, res) => {
@@ -430,3 +439,4 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
