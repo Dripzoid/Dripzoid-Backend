@@ -188,13 +188,13 @@ function authenticateToken(req, res, next) {
   try {
     let token = null;
 
-    // 1. Check Authorization header
+    // 1. Try Authorization header (for tokens stored in localStorage)
     const authHeader = req.headers["authorization"];
     if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
       token = authHeader.split(" ")[1];
     }
 
-    // 2. Check cookies if no header token
+    // 2. Fallback: Try cookie (for tokens stored in cookies)
     if (!token && req.cookies?.token) {
       token = req.cookies.token;
     }
@@ -210,7 +210,7 @@ function authenticateToken(req, res, next) {
       }
 
       // 4. Attach useful values for downstream routes
-      req.user = payload; // payload should include { id, email, is_admin, sessionId? }
+      req.user = payload;                 // e.g. { id, email, is_admin, sessionId? }
       req.token = token;
       req.sessionId = payload?.sessionId || req.cookies?.sessionId || null;
 
@@ -495,44 +495,57 @@ app.get(
 app.post("/api/account/signout-session", authenticateToken, (req, res) => {
   try {
     const userId = Number(req.user?.id);
-    const cookieSessionId = req.cookies?.sessionId;
-    if (!userId) return res.status(400).json({ message: "Invalid user" });
+    const sessionId = req.sessionId; // ✅ from token payload OR cookie (set in authenticateToken)
+
+    if (!userId) {
+      return res.status(400).json({ message: "Invalid user" });
+    }
 
     const finishSignout = () => {
       try {
+        // clear cookies (even if frontend uses localStorage, harmless to clear)
         res.clearCookie("token", AUTH_COOKIE_OPTIONS);
         res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
       } catch (e) {
         /* ignore cookie clear errors */
       }
+
       // ✅ Log user activity
       insertUserActivity(userId, "Logged Out", () => {});
+
       return res.json({ message: "Signed out" });
     };
 
-    if (cookieSessionId) {
+    if (sessionId) {
+      // Delete specific session
       db.run(
         "DELETE FROM user_sessions WHERE id = ? AND user_id = ?",
-        [cookieSessionId, userId],
+        [sessionId, userId],
         function (err) {
-          if (err) console.error("Signout delete session error:", err);
+          if (err) {
+            console.error("Signout delete session error:", err);
+          }
           finishSignout();
         }
       );
     } else {
-      // fallback: delete one session for user (best-effort)
+      // fallback: delete latest session for user
       db.get(
         "SELECT id FROM user_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
         [userId],
         (selErr, selRow) => {
-          if (selErr) console.error("Signout fallback select error:", selErr);
+          if (selErr) {
+            console.error("Signout fallback select error:", selErr);
+          }
           const delId = selRow?.id ?? null;
           if (delId) {
             db.run(
               "DELETE FROM user_sessions WHERE id = ? AND user_id = ?",
               [delId, userId],
               function (err) {
-                if (err) console.error("Signout delete fallback session error:", err);
+                if (err) {
+                  console.error("Signout delete fallback session error:", err);
+                }
                 finishSignout();
               }
             );
@@ -547,6 +560,7 @@ app.post("/api/account/signout-session", authenticateToken, (req, res) => {
     return res.status(500).json({ message: "Signout failed" });
   }
 });
+
 
 // Logout all sessions for current user
 app.post("/api/logout-all", authenticateToken, (req, res) => {
@@ -688,6 +702,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
