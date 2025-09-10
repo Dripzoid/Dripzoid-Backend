@@ -7,21 +7,18 @@ const router = express.Router();
 const DEFAULT_LIMIT = 50;
 const isIntegerString = (s) => /^-?\d+$/.test(String(s));
 const sanitizeSortBy = (s) => {
-  const allowed = new Set([
-    "delivery_date",
-    "expected_delivery_from",
-    "created_at",
-    "id",
-  ]);
-  return allowed.has(s) ? s : "delivery_date";
+  const allowed = new Set(["expected_delivery_from", "expected_delivery_to", "created_at", "id"]);
+  return allowed.has(s) ? s : "created_at";
 };
 const sanitizeSortOrder = (o) =>
-  ["ASC", "DESC"].includes(String(o).toUpperCase())
-    ? String(o).toUpperCase()
-    : "ASC";
+  ["ASC", "DESC"].includes(String(o).toUpperCase()) ? String(o).toUpperCase() : "ASC";
 
+/**
+ * GET /api/admin/orders
+ * Paginated orders list with filters
+ */
 router.get("/", authMiddleware, (req, res) => {
-  const { status, search, orderId, deliveryDate, startDate, endDate, page = 1, limit } = req.query;
+  const { status, search, orderId, startDate, endDate, page = 1, limit } = req.query;
 
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
 
@@ -33,7 +30,6 @@ router.get("/", authMiddleware, (req, res) => {
     params.push(Number(orderId));
   } else if (search) {
     if (/^\d+$/.test(search)) {
-      // numeric search fallback: user_id or name
       whereClauses.push("(u.id = ? OR LOWER(u.name) LIKE LOWER(?))");
       params.push(Number(search), `%${search}%`);
     } else {
@@ -47,16 +43,9 @@ router.get("/", authMiddleware, (req, res) => {
     params.push(status);
   }
 
-  if (deliveryDate) {
-    whereClauses.push("(DATE(o.expected_delivery_from) = DATE(?) OR DATE(o.delivery_date) = DATE(?))");
-    params.push(deliveryDate, deliveryDate);
-  }
-
   if (startDate && endDate) {
-    whereClauses.push(
-      "(DATE(o.expected_delivery_from) BETWEEN DATE(?) AND DATE(?) OR DATE(o.delivery_date) BETWEEN DATE(?) AND DATE(?))"
-    );
-    params.push(startDate, endDate, startDate, endDate);
+    whereClauses.push("DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)");
+    params.push(startDate, endDate);
   }
 
   const whereSQL = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
@@ -108,7 +97,6 @@ router.get("/", authMiddleware, (req, res) => {
   });
 });
 
-
 /**
  * GET /api/admin/orders/:id
  * Fetch single order with items
@@ -117,12 +105,7 @@ router.get("/:id", authMiddleware, (req, res) => {
   const orderId = req.params.id;
 
   const orderSQL = `
-    SELECT o.*, u.name AS user_name,
-      COALESCE(
-        o.shipping_address,
-        o.address_line1 || ', ' || o.address_line2 || ', ' || o.city || ', ' || o.state || ' - ' || o.pincode || ', ' || o.country || ' Phone: ' || o.phone,
-        ''
-      ) AS shipping_address_full
+    SELECT o.*, u.name AS user_name
     FROM orders o
     LEFT JOIN users u ON u.id = o.user_id
     WHERE o.id = ?
@@ -135,13 +118,11 @@ router.get("/:id", authMiddleware, (req, res) => {
   `;
 
   db.get(orderSQL, [orderId], (err, order) => {
-    if (err)
-      return res.status(500).json({ message: "Database error", error: err.message });
+    if (err) return res.status(500).json({ message: "Database error", error: err.message });
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     db.all(itemsSQL, [orderId], (err, items) => {
-      if (err)
-        return res.status(500).json({ message: "Database error", error: err.message });
+      if (err) return res.status(500).json({ message: "Database error", error: err.message });
       res.json({ ...order, items });
     });
   });
@@ -160,8 +141,7 @@ router.put("/bulk-update", authMiddleware, (req, res) => {
   const sql = `UPDATE orders SET status = ? WHERE id IN (${placeholders})`;
 
   db.run(sql, [status, ...orderIds], function (err) {
-    if (err)
-      return res.status(500).json({ message: "Database error", error: err.message });
+    if (err) return res.status(500).json({ message: "Database error", error: err.message });
     res.json({ message: "Bulk status update complete", updatedRows: this.changes });
   });
 });
@@ -175,19 +155,16 @@ router.put("/:id", authMiddleware, (req, res) => {
   if (!status) return res.status(400).json({ message: "Status is required" });
 
   db.run(`UPDATE orders SET status = ? WHERE id = ?`, [status, orderId], function (err) {
-    if (err)
-      return res.status(500).json({ message: "Database error", error: err.message });
+    if (err) return res.status(500).json({ message: "Database error", error: err.message });
     res.json({ message: "Order status updated", changes: this.changes });
   });
 });
 
 /**
  * GET /api/admin/orders/labels
- * Now supports orderId, status, deliveryDate, and date range filters
  */
 router.get("/labels", authMiddleware, (req, res) => {
-  const { orderId, status, deliveryDate, startDate, endDate, sortBy, sortOrder } =
-    req.query;
+  const { orderId, status, startDate, endDate, sortBy, sortOrder } = req.query;
 
   let whereClauses = [];
   let params = [];
@@ -200,32 +177,18 @@ router.get("/labels", authMiddleware, (req, res) => {
     whereClauses.push("LOWER(o.status) = LOWER(?)");
     params.push(status);
   }
-  if (deliveryDate) {
-    whereClauses.push("DATE(o.delivery_date) = DATE(?)");
-    params.push(deliveryDate);
-  }
   if (startDate && endDate) {
-    whereClauses.push("DATE(o.delivery_date) BETWEEN DATE(?) AND DATE(?)");
+    whereClauses.push("DATE(o.created_at) BETWEEN DATE(?) AND DATE(?)");
     params.push(startDate, endDate);
   }
 
   const whereSQL = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-  // sanitize sort params to prevent injection
-  const safeSortBy = sanitizeSortBy(sortBy || "delivery_date");
+  const safeSortBy = sanitizeSortBy(sortBy || "created_at");
   const safeSortOrder = sanitizeSortOrder(sortOrder || "ASC");
 
   const sql = `
-    SELECT o.*, u.name AS customerName,
-      COALESCE(o.shipping_address, '') AS shipping_address_full,
-      COALESCE(o.address_line1, '') AS addressLine1,
-      COALESCE(o.address_line2, '') AS addressLine2,
-      COALESCE(o.city, '') AS city,
-      COALESCE(o.state, '') AS state,
-      COALESCE(o.pincode, '') AS pincode,
-      COALESCE(o.country, '') AS country,
-      COALESCE(o.phone, '') AS phone,
-      COALESCE(o.barcode, '') AS barcode
+    SELECT o.*, u.name AS customerName, COALESCE(o.shipping_address, '') AS shipping_address_full
     FROM orders o
     LEFT JOIN users u ON u.id = o.user_id
     ${whereSQL}
@@ -233,8 +196,7 @@ router.get("/labels", authMiddleware, (req, res) => {
   `;
 
   db.all(sql, params, (err, orders) => {
-    if (err)
-      return res.status(500).json({ message: "Database error", error: err.message });
+    if (err) return res.status(500).json({ message: "Database error", error: err.message });
 
     const orderIds = orders.map((o) => o.id);
     if (orderIds.length === 0) return res.json([]);
@@ -248,8 +210,7 @@ router.get("/labels", authMiddleware, (req, res) => {
     `;
 
     db.all(itemsSQL, orderIds, (err, items) => {
-      if (err)
-        return res.status(500).json({ message: "Database error", error: err.message });
+      if (err) return res.status(500).json({ message: "Database error", error: err.message });
 
       const itemsMap = {};
       items.forEach((i) => {
@@ -269,36 +230,6 @@ router.get("/labels", authMiddleware, (req, res) => {
 });
 
 /**
- * POST /api/admin/orders/labels/zpl-batch
- */
-router.post("/labels/zpl-batch", authMiddleware, (req, res) => {
-  const { orderIds } = req.body;
-  if (!Array.isArray(orderIds) || orderIds.length === 0)
-    return res.status(400).json({ message: "Provide orderIds array" });
-
-  const placeholders = orderIds.map(() => "?").join(",");
-  // join users so we have customer name reliably
-  const sql = `
-    SELECT o.id, o.barcode, u.name AS customerName, o.address_line1, o.city, o.state, o.pincode
-    FROM orders o
-    LEFT JOIN users u ON u.id = o.user_id
-    WHERE o.id IN (${placeholders})
-  `;
-  db.all(sql, orderIds, (err, rows) => {
-    if (err) return res.status(500).json({ message: err.message });
-
-    let zpl = "";
-    rows.forEach((o) => {
-      zpl += `^XA\n^FO20,20^FDOrder: ${o.id}^FS\n^FO20,60^BCN,80,Y,N,N^FD${o.barcode || ""}^FS\n^FO20,150^FD${o.customerName || ""}, ${o.address_line1 || ""}, ${o.city || ""}, ${o.state || ""} ${o.pincode || ""}^FS\n^XZ\n`;
-    });
-
-    res.setHeader("Content-Disposition", "attachment; filename=labels.zpl");
-    res.setHeader("Content-Type", "text/plain");
-    res.send(zpl);
-  });
-});
-
-/**
  * GET /api/admin/orders/search
  */
 router.get("/search", authMiddleware, (req, res) => {
@@ -309,7 +240,7 @@ router.get("/search", authMiddleware, (req, res) => {
   let params;
   if (isIntegerString(query)) {
     sql = `
-      SELECT id, barcode, name AS customerName
+      SELECT o.id, u.name AS customerName
       FROM orders o
       LEFT JOIN users u ON u.id = o.user_id
       WHERE o.id = ? OR LOWER(u.name) LIKE LOWER(?)
@@ -318,7 +249,7 @@ router.get("/search", authMiddleware, (req, res) => {
     params = [Number(query), `%${query}%`];
   } else {
     sql = `
-      SELECT id, barcode, name AS customerName
+      SELECT o.id, u.name AS customerName
       FROM orders o
       LEFT JOIN users u ON u.id = o.user_id
       WHERE LOWER(u.name) LIKE LOWER(?)
@@ -334,4 +265,3 @@ router.get("/search", authMiddleware, (req, res) => {
 });
 
 export default router;
-
