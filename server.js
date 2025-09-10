@@ -478,41 +478,49 @@ app.post("/api/account/signout-session", authenticateToken, (req, res) => {
     const cookieSessionId = req.cookies?.sessionId;
     if (!userId) return res.status(400).json({ message: "Invalid user" });
 
+    const finishSignout = () => {
+      try {
+        res.clearCookie("token", AUTH_COOKIE_OPTIONS);
+        res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
+      } catch (e) {
+        /* ignore cookie clear errors */
+      }
+      // ✅ Log user activity
+      insertUserActivity(userId, "Logged Out", () => {});
+      return res.json({ message: "Signed out" });
+    };
+
     if (cookieSessionId) {
-      db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [cookieSessionId, userId], function (err) {
-        if (err) console.error("Signout delete session error:", err);
-        // clear cookies regardless
-        try {
-          res.clearCookie("token", AUTH_COOKIE_OPTIONS);
-          res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
-        } catch (e) {
-          /* ignore cookie clear errors */
+      db.run(
+        "DELETE FROM user_sessions WHERE id = ? AND user_id = ?",
+        [cookieSessionId, userId],
+        function (err) {
+          if (err) console.error("Signout delete session error:", err);
+          finishSignout();
         }
-        return res.json({ message: "Signed out" });
-      });
+      );
     } else {
       // fallback: delete one session for user (best-effort)
-      // safer: select one session id then delete it
-      db.get("SELECT id FROM user_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1", [userId], (selErr, selRow) => {
-        if (selErr) console.error("Signout fallback select error:", selErr);
-        const delId = selRow?.id ?? null;
-        if (delId) {
-          db.run("DELETE FROM user_sessions WHERE id = ? AND user_id = ?", [delId, userId], function (err) {
-            if (err) console.error("Signout delete fallback session error:", err);
-            try {
-              res.clearCookie("token", AUTH_COOKIE_OPTIONS);
-              res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
-            } catch (e) {}
-            return res.json({ message: "Signed out" });
-          });
-        } else {
-          try {
-            res.clearCookie("token", AUTH_COOKIE_OPTIONS);
-            res.clearCookie("sessionId", AUTH_COOKIE_OPTIONS);
-          } catch (e) {}
-          return res.json({ message: "Signed out" });
+      db.get(
+        "SELECT id FROM user_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+        [userId],
+        (selErr, selRow) => {
+          if (selErr) console.error("Signout fallback select error:", selErr);
+          const delId = selRow?.id ?? null;
+          if (delId) {
+            db.run(
+              "DELETE FROM user_sessions WHERE id = ? AND user_id = ?",
+              [delId, userId],
+              function (err) {
+                if (err) console.error("Signout delete fallback session error:", err);
+                finishSignout();
+              }
+            );
+          } else {
+            finishSignout();
+          }
         }
-      });
+      );
     }
   } catch (err) {
     console.error("Signout error:", err);
@@ -660,4 +668,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
