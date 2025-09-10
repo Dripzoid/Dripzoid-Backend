@@ -183,9 +183,6 @@ function insertUserActivity(userId, action, cb) {
 }
 
 // -------------------- JWT Middleware --------------------
-import jwt from "jsonwebtoken";
-
-const JWT_SECRET = process.env.JWT_SECRET || "secret";
 
 function authenticateToken(req, res, next) {
   try {
@@ -691,6 +688,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
