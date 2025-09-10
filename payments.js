@@ -110,7 +110,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       db.run(
         `INSERT INTO orders (user_id, shipping_json, total_amount, status) 
          VALUES (?, ?, ?, ?)`,
-        [req.user.id, JSON.stringify(shipping || {}), totalAmtNumber, "Confirmed"],
+        [req.user.id, JSON.stringify(shipping || {}), totalAmtNumber, "Pending"],
         function (err) {
           if (err) return reject(err);
           resolve({ id: this.lastID });
@@ -203,7 +203,7 @@ router.post("/razorpay/verify", auth, async (req, res) => {
         `UPDATE orders 
          SET status = ?, razorpay_payment_id = ?, updated_at = CURRENT_TIMESTAMP 
          WHERE id = ? AND user_id = ?`,
-        ["paid", razorpay_payment_id, internalOrderId, req.user.id],
+        ["Confirmed", razorpay_payment_id, internalOrderId, req.user.id],
         function (err) {
           if (err) return reject(err);
           if (this.changes === 0) return reject(new Error("Order not found or not owned by user"));
@@ -232,3 +232,4 @@ router.post("/razorpay/verify", auth, async (req, res) => {
 });
 
 export default router;
+
