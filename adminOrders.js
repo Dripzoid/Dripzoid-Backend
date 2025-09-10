@@ -54,6 +54,22 @@ function buildShippingAddressFull(order = {}) {
 function extractImageUrl(imagesField) {
   if (!imagesField) return null;
 
+  // If comma-separated string (handle newlines)
+  if (typeof imagesField === "string" && imagesField.includes(",")) {
+    const parts = imagesField
+      .split(",")
+      .map((s) => s.trim())   // removes spaces
+      .map((s) => s.replace(/[\r\n]+/g, "")) // remove line breaks
+      .filter((s) => /^https?:\/\//i.test(s)); // keep valid URLs
+    return parts.length ? parts[0] : null; // return first URL
+  }
+
+  // Already a URL
+  if (typeof imagesField === "string" && /^https?:\/\//i.test(imagesField.trim())) {
+    return imagesField.trim();
+  }
+
+  // Try JSON parse
   try {
     const parsed = typeof imagesField === "string" ? JSON.parse(imagesField) : imagesField;
     if (Array.isArray(parsed) && parsed.length) {
@@ -61,15 +77,14 @@ function extractImageUrl(imagesField) {
       if (!first) return null;
       return typeof first === "string" ? first : first.url ?? first.src ?? first.path ?? null;
     }
-    if (parsed && typeof parsed === "object") return parsed.url ?? parsed.src ?? parsed.path ?? null;
-  } catch (_) {
-    if (typeof imagesField === "string" && imagesField.includes(",")) {
-      const parts = imagesField.split(",").map((s) => s.trim()).filter(Boolean);
-      if (parts.length) return parts[0];
+    if (parsed && typeof parsed === "object") {
+      return parsed.url ?? parsed.src ?? parsed.path ?? null;
     }
-  }
+  } catch (_) {}
+
   return null;
 }
+
 
 // ------------------ Promisified DB ------------------
 const dbGet = (sql, params = []) => new Promise((resolve, reject) => {
@@ -358,4 +373,5 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
 
