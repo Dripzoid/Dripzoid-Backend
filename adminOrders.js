@@ -1,4 +1,3 @@
-// routes/adminOrders.js
 import express from "express";
 import db from "./db.js";
 import authMiddleware from "./authAdmin.js";
@@ -6,7 +5,7 @@ import authMiddleware from "./authAdmin.js";
 const router = express.Router();
 const DEFAULT_LIMIT = 50;
 
-// ------------------ Helper functions ------------------
+// ------------------ Helpers ------------------
 const isIntegerString = (s) => /^-?\d+$/.test(String(s));
 
 const sanitizeSortBy = (s) => {
@@ -42,7 +41,7 @@ function buildShippingAddressFull(order = {}) {
     const phone = payload.phone ?? payload.mobile;
     if (phone) parts.push("Phone: " + String(phone).trim());
     if (parts.length) return parts.join(", ");
-  } catch (e) {
+  } catch (_) {
     try {
       const raw = String(sj).trim();
       if (raw.includes(",")) return raw;
@@ -52,46 +51,78 @@ function buildShippingAddressFull(order = {}) {
   return "";
 }
 
-function extractImageUrl(imagesField, productRow = {}) {
-  if (!imagesField && (productRow.image || productRow.thumbnail)) {
-    return productRow.image || productRow.thumbnail;
-  }
+function extractImageUrl(imagesField) {
   if (!imagesField) return null;
-
-  if (typeof imagesField === "string" && /^https?:\/\//i.test(imagesField.trim())) {
-    return imagesField.trim();
-  }
 
   try {
     const parsed = typeof imagesField === "string" ? JSON.parse(imagesField) : imagesField;
     if (Array.isArray(parsed) && parsed.length) {
       const first = parsed[0];
       if (!first) return null;
-      if (typeof first === "string") return first;
-      if (typeof first === "object") return first.url ?? first.src ?? first.path ?? null;
+      return typeof first === "string" ? first : first.url ?? first.src ?? first.path ?? null;
     }
     if (parsed && typeof parsed === "object") return parsed.url ?? parsed.src ?? parsed.path ?? null;
-  } catch (e) {
+  } catch (_) {
     if (typeof imagesField === "string" && imagesField.includes(",")) {
-      const parts = imagesField.split(",").map(s => s.trim()).filter(Boolean);
-      if (parts.length && /^https?:\/\//i.test(parts[0])) return parts[0];
+      const parts = imagesField.split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length) return parts[0];
     }
   }
   return null;
 }
 
-// ------------------ Promisified DB helpers ------------------
-function dbGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
-  });
-}
+// ------------------ Promisified DB ------------------
+const dbGet = (sql, params = []) => new Promise((resolve, reject) => {
+  db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+});
 
-function dbAll(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
-  });
-}
+const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
+  db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
+});
+
+// ------------------ Routes ------------------
+
+// GET single order with items
+router.get("/:id", authMiddleware, async (req, res) => {
+  try {
+    const orderId = req.params.id;
+    if (!orderId) return res.status(400).json({ message: "Order ID required" });
+
+    const orderSQL = `
+      SELECT o.*, u.name AS user_name
+      FROM orders o
+      LEFT JOIN users u ON u.id = o.user_id
+      WHERE o.id = ?
+    `;
+    const order = await dbGet(orderSQL, [orderId]);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    order.shipping_address_full = order.shipping_address || buildShippingAddressFull(order);
+
+    const itemsSQL = `
+      SELECT oi.*, p.name AS product_name, p.images
+      FROM order_items oi
+      LEFT JOIN products p ON p.id = oi.product_id
+      WHERE oi.order_id = ?
+    `;
+    const items = await dbAll(itemsSQL, [orderId]);
+
+    const processedItems = (items || []).map((i) => ({
+      product_id: i.product_id,
+      name: i.product_name ?? i.name ?? null,
+      quantity: Number(i.quantity) || 0,
+      unit_price: i.unit_price ?? null,
+      line_total: i.price ?? i.line_total ?? null,
+      image_url: extractImageUrl(i.images),
+      raw: i,
+    }));
+
+    res.json({ ...order, items: processedItems });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Internal server error", error: err.message });
+  }
+});
 
 // ------------------ Routes ------------------
 
@@ -286,50 +317,7 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/admin/orders/:id
-router.get("/:id", authMiddleware, async (req, res) => {
-  try {
-    const orderId = req.params.id;
-    if (!orderId) return res.status(400).json({ message: "Order ID required" });
 
-    const orderSQL = `
-      SELECT o.*, u.name AS user_name
-      FROM orders o
-      LEFT JOIN users u ON u.id = o.user_id
-      WHERE o.id = ?
-    `;
-    const order = await dbGet(orderSQL, [orderId]);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    order.shipping_address_full = order.shipping_address || buildShippingAddressFull(order);
-
-    const itemsSQL = `
-      SELECT oi.*, p.name AS product_name, p.images, p.image
-      FROM order_items oi
-      JOIN products p ON p.id = oi.product_id
-      WHERE oi.order_id = ?
-    `;
-    const items = await dbAll(itemsSQL, [orderId]);
-
-    const processedItems = (items || []).map(i => {
-      const image_url = extractImageUrl(i.images ?? i.image, i) || null;
-      return {
-        product_id: i.product_id,
-        name: i.product_name ?? i.name ?? null,
-        quantity: Number(i.quantity) || 0,
-        unit_price: typeof i.unit_price !== "undefined" ? i.unit_price : null,
-        line_total: i.price ?? i.line_total ?? null,
-        image_url,
-        raw: i,
-      };
-    });
-
-    res.json({ ...order, items: processedItems });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Internal server error", error: err.message });
-  }
-});
 
 // PUT /api/admin/orders/bulk-update
 router.put("/bulk-update", authMiddleware, async (req, res) => {
@@ -370,3 +358,4 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
