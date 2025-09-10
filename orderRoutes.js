@@ -80,7 +80,7 @@ router.post("/place-order", auth, async (req, res) => {
       const orderInsert = await runQuery(
         `INSERT INTO orders 
           (user_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'))`,
+         VALUES (?, ?, ?, ?, ?, 'Confirmed', datetime('now', 'localtime'))`,
         [
           userId,
           JSON.stringify(shippingAddress || {}),
@@ -359,6 +359,7 @@ router.get("/stream", (req, res) => {
 });
 
 export default router;
+
 
 
 
