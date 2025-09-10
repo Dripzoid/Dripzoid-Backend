@@ -18,180 +18,98 @@ const sanitizeSortOrder = (o) =>
   ["ASC", "DESC"].includes(String(o).toUpperCase()) ? String(o).toUpperCase() : "ASC";
 
 /**
- * Parse a shipping payload which may be:
- *  - a JSON string
- *  - an object
- *  - a plain text string
- *
- * Return an object with normalized fields we may use:
- * { name, street, village, locality, city, state, pincode, country, phone }
+ * Normalize shipping payload to consistent structure
  */
 function normalizeShippingPayload(raw) {
   if (!raw) return null;
-
   let payload = raw;
+
   if (typeof raw === "string") {
-    // If it's a JSON string, parse it
     try {
       payload = JSON.parse(raw);
     } catch {
-      // not JSON: treat as plain string
       const plain = String(raw || "").trim();
       if (!plain) return null;
-      // attempt to split into parts heuristically
       const parts = plain.split(",").map(p => p.trim()).filter(Boolean);
       const [street = "", village = "", locality = "", city = "", state = "", pincode = "", country = ""] = parts;
-      return {
-        name: null,
-        street: street || null,
-        village: village || null,
-        locality: locality || city || null,
-        city: city || null,
-        state: state || null,
-        pincode: pincode || null,
-        country: country || null,
-        phone: null,
-      };
+      return { name: null, street, village, locality, city, state, pincode, country, phone: null };
     }
   }
 
   if (typeof payload !== "object" || payload === null) return null;
 
-  // Map common field names to normalized fields
-  const name = payload.name ?? payload.fullname ?? payload.customer_name ?? null;
-  const street = payload.address ?? payload.street ?? payload.line1 ?? null;
-  // some payloads contain village/locality fields
-  const village = payload.village ?? payload.locality ?? payload.neighborhood ?? null;
-  // city/locality
-  const city = payload.city ?? payload.town ?? payload.city_name ?? payload.locality ?? null;
-  const locality = payload.locality ?? payload.area ?? null;
-  const state = payload.state ?? payload.region ?? null;
-  const pincode = payload.pincode ?? payload.postal ?? payload.zip ?? null;
-  const country = payload.country ?? null;
-  const phone = payload.phone ?? payload.mobile ?? payload.contact ?? null;
-
   return {
-    name: name || null,
-    street: street || null,
-    village: village || null,
-    locality: locality || null,
-    city: city || null,
-    state: state || null,
-    pincode: pincode || null,
-    country: country || null,
-    phone: phone || null,
+    name: payload.name ?? payload.fullname ?? payload.customer_name ?? null,
+    street: payload.address ?? payload.street ?? payload.line1 ?? null,
+    village: payload.village ?? payload.locality ?? payload.neighborhood ?? null,
+    locality: payload.locality ?? payload.area ?? null,
+    city: payload.city ?? payload.town ?? payload.city_name ?? null,
+    state: payload.state ?? payload.region ?? null,
+    pincode: payload.pincode ?? payload.postal ?? payload.zip ?? null,
+    country: payload.country ?? null,
+    phone: payload.phone ?? payload.mobile ?? payload.contact ?? null,
   };
 }
 
 /**
- * Build a human-friendly shipping address string.
- * Order: [name] street, village, locality/city, state, pincode, country, Phone: <phone>
+ * Build formatted shipping address string
  */
 function buildShippingAddressFull(order = {}) {
   if (!order) return "";
-
-  // Prefer shipping_json if present, otherwise shipping_address if present (which may be JSON string)
   const raw = order.shipping_json ?? order.shipping_address ?? order.shipping ?? null;
   if (!raw) return "";
 
   const normalized = normalizeShippingPayload(raw);
-  if (!normalized) {
-    // If normalization failed, return trimmed raw string (avoid returning JSON stringified form)
-    try {
-      const s = String(raw).trim();
-      return s;
-    } catch {
-      return "";
-    }
-  }
+  if (!normalized) return String(raw).trim();
 
   const parts = [];
-  // optionally include name at the start (e.g., "Work — John Doe")
-  if (normalized.name) parts.push(String(normalized.name).trim());
-
-  // street then village
-  if (normalized.street) parts.push(String(normalized.street).trim());
-  if (normalized.village) parts.push(String(normalized.village).trim());
-
-  // locality or city (prefer locality if present)
-  if (normalized.locality) parts.push(String(normalized.locality).trim());
-  else if (normalized.city) parts.push(String(normalized.city).trim());
-
-  // state
-  if (normalized.state) parts.push(String(normalized.state).trim());
-
-  // pincode
-  if (normalized.pincode) parts.push(String(normalized.pincode).trim());
-
-  // country
-  if (normalized.country) parts.push(String(normalized.country).trim());
+  if (normalized.name) parts.push(normalized.name);
+  if (normalized.street) parts.push(normalized.street);
+  if (normalized.village) parts.push(normalized.village);
+  if (normalized.locality) parts.push(normalized.locality);
+  else if (normalized.city) parts.push(normalized.city);
+  if (normalized.state) parts.push(normalized.state);
+  if (normalized.pincode) parts.push(normalized.pincode);
+  if (normalized.country) parts.push(normalized.country);
 
   let address = parts.filter(Boolean).join(", ");
-  if (normalized.phone) {
-    const phone = String(normalized.phone).trim();
-    address = address ? `${address}, Phone: ${phone}` : `Phone: ${phone}`;
-  }
-
+  if (normalized.phone) address = address ? `${address}, Phone: ${normalized.phone}` : `Phone: ${normalized.phone}`;
   return address || "";
 }
 
 /**
- * Extract a single image URL (the first valid one) from different shapes:
- *  - JSON array string: '["url1","url2"]'
- *  - JSON array of objects: '[{ "url": "..."}]'
- *  - comma-separated string possibly containing newlines
- *  - single URL string
- *  - object with url/src/path properties
- *
- * Returns null if no valid URL found.
+ * Extract first valid image URL
  */
 function extractImageUrl(imagesField) {
   if (!imagesField) return null;
 
-  // If it's already an object with url/src/path
   if (typeof imagesField === "object" && !Array.isArray(imagesField)) {
     return imagesField.url ?? imagesField.src ?? imagesField.path ?? null;
   }
 
-  // If it's a string, normalize newlines and whitespace
   if (typeof imagesField === "string") {
     const raw = imagesField.trim();
 
-    // If it's a single valid URL, return it
-    if (/^https?:\/\//i.test(raw)) {
-      // If there are newlines/commas inside the string we still handle below
-      if (!raw.includes(",") && !/[\r\n]/.test(raw)) return raw;
-    }
+    if (/^https?:\/\//i.test(raw) && !raw.includes(",") && !/[\r\n]/.test(raw)) return raw;
 
-    // Try parse as JSON (array or object)
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length) {
         const first = parsed[0];
-        if (typeof first === "string" && /^https?:\/\//i.test(first.trim())) return first.trim();
-        if (typeof first === "object") return first.url ?? first.src ?? first.path ?? null;
+        return typeof first === "string" ? first : first?.url ?? first?.src ?? first?.path ?? null;
       }
-      if (parsed && typeof parsed === "object") {
-        return parsed.url ?? parsed.src ?? parsed.path ?? null;
-      }
-    } catch (_) {
-      // not JSON - fallthrough to comma/newline splitting
-    }
+      if (parsed && typeof parsed === "object") return parsed.url ?? parsed.src ?? parsed.path ?? null;
+    } catch (_) {}
 
-    // Handle comma-separated with possible newlines
     if (raw.includes(",") || /[\r\n]/.test(raw)) {
       const parts = raw
-        .split(/[,|\n|\r]+/) // split on comma or newline (handles both)
-        .map(s => s.replace(/[\r\n]+/g, "").trim()) // remove stray newlines and trim
+        .split(/[,|\n|\r]+/)
+        .map(s => s.replace(/[\r\n]+/g, "").trim())
         .filter(Boolean);
-
-      for (const p of parts) {
-        if (/^https?:\/\//i.test(p)) return p;
-      }
+      for (const p of parts) if (/^https?:\/\//i.test(p)) return p;
       return null;
     }
 
-    // Last attempt: if trimmed string is a URL-like
     if (/^https?:\/\//i.test(raw)) return raw;
     return null;
   }
@@ -213,6 +131,26 @@ function dbAll(sql, params = []) {
 }
 
 // ------------------ Routes ------------------
+
+// GET /api/admin/orders/stats
+router.get("/stats", authMiddleware, async (req, res) => {
+  try {
+    const sql = `
+      SELECT 
+        COUNT(*) AS total_orders,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_orders,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_orders,
+        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_orders,
+        SUM(total_amount) AS total_revenue
+      FROM orders
+    `;
+    const stats = await dbGet(sql);
+    res.json(stats);
+  } catch (err) {
+    console.error("GET /stats error:", err);
+    res.status(500).json({ message: "Internal server error", error: err.message });
+  }
+});
 
 // GET /api/admin/orders/labels
 router.get("/labels", authMiddleware, async (req, res) => {
@@ -247,13 +185,13 @@ router.get("/labels", authMiddleware, async (req, res) => {
       ORDER BY ${safeSortBy} ${safeSortOrder}
     `;
     const orders = await dbAll(sql, params);
-
     if (!orders.length) return res.json([]);
 
     const orderIds = orders.map(o => o.id);
     const placeholders = orderIds.map(() => "?").join(",");
     const itemsSQL = `
-      SELECT oi.order_id, oi.product_id, oi.quantity, oi.unit_price, oi.price AS line_total, p.name AS product_name, p.images
+      SELECT oi.order_id, oi.product_id, oi.quantity, oi.unit_price, oi.price AS line_total, 
+             p.name AS product_name, p.images
       FROM order_items oi
       LEFT JOIN products p ON p.id = oi.product_id
       WHERE oi.order_id IN (${placeholders})
@@ -274,15 +212,12 @@ router.get("/labels", authMiddleware, async (req, res) => {
       });
     });
 
-    const enrichedOrders = orders.map(o => {
-      const shippingSource = o.shipping_address_raw ?? o.shipping_json ?? null;
-      return {
-        ...o,
-        shipping_address_full: buildShippingAddressFull({ shipping_address: shippingSource, shipping_json: null }),
-        items: itemsMap[o.id] || [],
-        customerName: o.customerName,
-      };
-    });
+    const enrichedOrders = orders.map(o => ({
+      ...o,
+      shipping_address_full: buildShippingAddressFull(o),
+      items: itemsMap[o.id] || [],
+      customerName: o.customerName,
+    }));
 
     res.json(enrichedOrders);
   } catch (err) {
@@ -423,7 +358,6 @@ router.get("/:id", authMiddleware, async (req, res) => {
     const order = await dbGet(orderSQL, [orderId]);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Build a nicely formatted shipping address
     order.shipping_address_full = buildShippingAddressFull(order);
 
     const itemsSQL = `
@@ -434,18 +368,15 @@ router.get("/:id", authMiddleware, async (req, res) => {
     `;
     const items = await dbAll(itemsSQL, [orderId]);
 
-    const processedItems = (items || []).map(i => {
-      const image_url = extractImageUrl(i.images) || null;
-      return {
-        product_id: i.product_id,
-        name: i.product_name ?? i.name ?? null,
-        quantity: Number(i.quantity) || 0,
-        unit_price: typeof i.unit_price !== "undefined" ? i.unit_price : null,
-        line_total: i.price ?? i.line_total ?? null,
-        image_url,
-        raw: i,
-      };
-    });
+    const processedItems = (items || []).map(i => ({
+      product_id: i.product_id,
+      name: i.product_name ?? i.name ?? null,
+      quantity: Number(i.quantity) || 0,
+      unit_price: i.unit_price ?? null,
+      line_total: i.price ?? i.line_total ?? null,
+      image_url: extractImageUrl(i.images),
+      raw: i,
+    }));
 
     res.json({ ...order, items: processedItems });
   } catch (err) {
