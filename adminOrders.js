@@ -379,7 +379,10 @@ router.get("/:id", authMiddleware, async (req, res) => {
     order.shipping_address_full = buildShippingAddressFull(order);
 
     const itemsSQL = `
-      SELECT oi.*, p.name AS product_name, p.images
+      SELECT 
+        oi.*, 
+        p.name AS product_name, 
+        p.images
       FROM order_items oi
       LEFT JOIN products p ON p.id = oi.product_id
       WHERE oi.order_id = ?
@@ -393,6 +396,8 @@ router.get("/:id", authMiddleware, async (req, res) => {
       unit_price: i.unit_price ?? null,
       line_total: i.price ?? i.line_total ?? null,
       image_url: extractImageUrl(i.images),
+      selectedColor: i.selectedColor ?? null,  // ✅ newly added
+      selectedSize: i.selectedSize ?? null,    // ✅ newly added
       raw: i,
     }));
 
@@ -402,6 +407,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Internal server error", error: err.message });
   }
 });
+
 
 // PUT /api/admin/orders/bulk-update
 router.put("/bulk-update", authMiddleware, async (req, res) => {
@@ -448,5 +454,6 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
 
 
