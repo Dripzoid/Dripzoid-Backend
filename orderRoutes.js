@@ -47,12 +47,11 @@ router.post("/place-order", auth, async (req, res) => {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-  // Normalize arrays
   const cartItemsArr = Array.isArray(cartItems) ? cartItems : [];
   const itemsArr = Array.isArray(items) ? items : [];
 
   try {
-    // If buyNow flow: validate items array contains product_id and quantity
+    // ---------- BUY NOW FLOW ----------
     if (buyNow) {
       if (!itemsArr.length) {
         return res.status(400).json({ error: "No items provided for buy-now" });
@@ -67,16 +66,13 @@ router.post("/place-order", auth, async (req, res) => {
 
         const product = await getQuery(`SELECT * FROM products WHERE id = ?`, [productId]);
         if (!product) return res.status(404).json({ error: `Product not found: ${productId}` });
-
         if (product.stock !== null && product.stock !== undefined && Number(product.stock) < qty) {
           return res.status(400).json({ error: `Insufficient stock for product ${productId}` });
         }
       }
 
-      // Begin transaction
       await runQuery("BEGIN TRANSACTION");
 
-      // Insert order
       const orderInsert = await runQuery(
         `INSERT INTO orders 
           (user_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
@@ -91,20 +87,18 @@ router.post("/place-order", auth, async (req, res) => {
       );
       const orderId = orderInsert.lastID;
 
-      // Insert each order_item & decrement stock (with check)
       for (const it of itemsArr) {
         const productId = it.product_id ?? it.product?.id ?? it.product_snapshot?.id;
         const qty = Number(it.quantity ?? 1);
-
         const product = await getQuery(`SELECT price FROM products WHERE id = ?`, [productId]);
         const price = Number(product?.price ?? it.price ?? 0);
 
         await runQuery(
-          `INSERT INTO order_items (order_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`,
-          [orderId, productId, qty, price]
+          `INSERT INTO order_items (order_id, product_id, quantity, price, selectedColor, selectedSize) 
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [orderId, productId, qty, price, it.selectedColor ?? null, it.selectedSize ?? null]
         );
 
-        // Update stock atomically (prevent negative stock)
         const upd = await runQuery(
           `UPDATE products
            SET stock = stock - ?, sold = COALESCE(sold, 0) + ?
@@ -112,7 +106,6 @@ router.post("/place-order", auth, async (req, res) => {
           [qty, qty, productId, qty]
         );
 
-        // If no rows updated, insufficient stock (possible race) -> rollback
         if (!upd || upd.changes === 0) {
           throw new Error(`Insufficient stock when committing product ${productId}`);
         }
@@ -122,40 +115,30 @@ router.post("/place-order", auth, async (req, res) => {
       return res.status(200).json({ success: true, orderId });
     }
 
-    // -------- CART-BASED FLOW --------
-    // cartItems expected; allow items of shape { id: cart_row_id OR product_id } OR { product_id }
+    // ---------- CART FLOW ----------
     if (!cartItemsArr.length) {
       return res.status(400).json({ error: "No cart items provided" });
     }
 
-    // We will resolve each cart item into a cartEntry (ensures ownership) and product
     const cartRowIdsToDelete = [];
-    const validatedItems = []; // { product_id, quantity, cart_id }
+    const validatedItems = [];
 
     for (const item of cartItemsArr) {
-      // If item provides cart row id (id), try to resolve robustly:
       if (item.id !== undefined && item.id !== null) {
         const providedId = Number(item.id);
-
-        // 1) Try treat providedId as cart_items.id
         let cartEntry = await getQuery(
           `SELECT * FROM cart_items WHERE id = ? AND user_id = ?`,
           [providedId, userId]
         );
-
-        // 2) If not found, treat providedId as product_id (frontend sometimes sends product id in `id`)
         if (!cartEntry) {
           cartEntry = await getQuery(
             `SELECT * FROM cart_items WHERE product_id = ? AND user_id = ?`,
             [providedId, userId]
           );
         }
-
         if (!cartEntry) {
-          return res.status(400).json({ error: `Cart item not found or not owned by user (tried cart_id and product_id): ${item.id}` });
+          return res.status(400).json({ error: `Cart item not found or not owned by user: ${item.id}` });
         }
-
-        // Use quantity from cartEntry unless override
         const qty = Number(item.quantity ?? cartEntry.quantity ?? 1);
         const productId = cartEntry.product_id;
         const product = await getQuery(`SELECT * FROM products WHERE id = ?`, [productId]);
@@ -163,15 +146,19 @@ router.post("/place-order", auth, async (req, res) => {
         if (product.stock !== null && product.stock !== undefined && Number(product.stock) < qty) {
           return res.status(400).json({ error: `Insufficient stock for product ${productId}` });
         }
-        validatedItems.push({ product_id: productId, quantity: qty, cart_id: cartEntry.id });
+        validatedItems.push({ 
+          product_id: productId, 
+          quantity: qty, 
+          cart_id: cartEntry.id,
+          selectedColor: item.selectedColor ?? null,
+          selectedSize: item.selectedSize ?? null
+        });
         cartRowIdsToDelete.push(cartEntry.id);
         continue;
       }
 
-      // Else, if item provides product_id, find user's cart row for that product
       if (item.product_id !== undefined && item.product_id !== null) {
         const productId = Number(item.product_id);
-        // prefer cart entry for that product + user
         const cartEntry = await getQuery(
           `SELECT * FROM cart_items WHERE product_id = ? AND user_id = ?`,
           [productId, userId]
@@ -185,19 +172,22 @@ router.post("/place-order", auth, async (req, res) => {
         if (product.stock !== null && product.stock !== undefined && Number(product.stock) < qty) {
           return res.status(400).json({ error: `Insufficient stock for product ${productId}` });
         }
-        validatedItems.push({ product_id: productId, quantity: qty, cart_id: cartEntry.id });
+        validatedItems.push({ 
+          product_id: productId, 
+          quantity: qty, 
+          cart_id: cartEntry.id,
+          selectedColor: item.selectedColor ?? null,
+          selectedSize: item.selectedSize ?? null
+        });
         cartRowIdsToDelete.push(cartEntry.id);
         continue;
       }
 
-      // Unknown item shape
       return res.status(400).json({ error: "cartItems must include either id (cart row id or product id) or product_id" });
     }
 
-    // All items validated — start transaction
     await runQuery("BEGIN TRANSACTION");
 
-    // Insert order
     const orderInsert = await runQuery(
       `INSERT INTO orders 
         (user_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
@@ -212,17 +202,16 @@ router.post("/place-order", auth, async (req, res) => {
     );
     const orderId = orderInsert.lastID;
 
-    // Insert order_items & update stock
     for (const v of validatedItems) {
       const product = await getQuery(`SELECT price FROM products WHERE id = ?`, [v.product_id]);
       const price = Number(product?.price ?? 0);
 
       await runQuery(
-        `INSERT INTO order_items (order_id, product_id, quantity, price) VALUES (?, ?, ?, ?)`,
-        [orderId, v.product_id, v.quantity, price]
+        `INSERT INTO order_items (order_id, product_id, quantity, price, selectedColor, selectedSize) 
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [orderId, v.product_id, v.quantity, price, v.selectedColor, v.selectedSize]
       );
 
-      // Update stock with safe check
       const upd = await runQuery(
         `UPDATE products
          SET stock = stock - ?, sold = COALESCE(sold, 0) + ?
@@ -235,7 +224,6 @@ router.post("/place-order", auth, async (req, res) => {
       }
     }
 
-    // Delete only the processed cart rows for this user
     if (cartRowIdsToDelete.length > 0) {
       const placeholders = cartRowIdsToDelete.map(() => "?").join(",");
       await runQuery(
@@ -256,6 +244,7 @@ router.post("/place-order", auth, async (req, res) => {
     return res.status(500).json({ error: "Could not place order", details: err?.message || String(err) });
   }
 });
+
 
 /**
  * GET /orders/:id
@@ -359,6 +348,7 @@ router.get("/stream", (req, res) => {
 });
 
 export default router;
+
 
 
 
