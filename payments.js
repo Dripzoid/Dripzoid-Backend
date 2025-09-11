@@ -119,21 +119,31 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     });
 
     // 2️⃣ Insert items into order_items
-    for (const item of items) {
-      const unitPrice = Number(item.unit_price || item.price || 0);
-      const quantity = Number(item.quantity || 1);
-      await new Promise((resolve, reject) => {
-        db.run(
-          `INSERT INTO order_items (order_id, product_id, quantity, unit_price, price) 
-           VALUES (?, ?, ?, ?, ?)`,
-          [orderResult.id, item.product_id, quantity, unitPrice, unitPrice * quantity],
-          function (err) {
-            if (err) return reject(err);
-            resolve();
-          }
-        );
-      });
-    }
+// 2️⃣ Insert items into order_items
+for (const item of items) {
+  const unitPrice = Number(item.unit_price || item.price || 0);
+  const quantity = Number(item.quantity || 1);
+  await new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO order_items (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        orderResult.id,
+        item.product_id,
+        quantity,
+        unitPrice,
+        unitPrice * quantity,
+        item.selectedColor ?? null,
+        item.selectedSize ?? null,
+      ],
+      function (err) {
+        if (err) return reject(err);
+        resolve();
+      }
+    );
+  });
+}
+
 
     // 3️⃣ Create Razorpay order
     const razorOrder = await razorpay.orders.create({
@@ -232,4 +242,5 @@ router.post("/razorpay/verify", auth, async (req, res) => {
 });
 
 export default router;
+
 
