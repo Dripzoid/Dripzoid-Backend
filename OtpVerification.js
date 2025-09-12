@@ -9,7 +9,7 @@ import cors from "cors";
 dotenv.config();
 
 const router = express.Router();
-const db = new Database(process.env.DATABASE_FILE || "./dripzoid.db");
+const db = new Database(process.env.DATABASE_FILE);
 
 // Enable CORS for frontend
 router.use(cors({ origin: process.env.CLIENT_URL || "*" }));
