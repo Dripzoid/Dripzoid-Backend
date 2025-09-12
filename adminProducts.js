@@ -371,27 +371,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
     });
 });
 
-/**
- * GET: Single Product by ID
- */
-router.get("/:id", (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid product ID" });
 
-    db.get("SELECT * FROM products WHERE id = ?", [id], (err, row) => {
-      if (err) {
-        console.error("Fetch single product error:", err);
-        return res.status(500).json({ message: "DB error", detail: err.message });
-      }
-      if (!row) return res.status(404).json({ message: "Product not found" });
-      return res.json(row);
-    });
-  } catch (ex) {
-    console.error("Unhandled error in GET /admin/products/:id:", ex);
-    res.status(500).json({ message: "Server error", detail: ex.message });
-  }
-});
 
 /**
  * ================================
@@ -459,6 +439,28 @@ router.post("/categories", (req, res) => {
   }
 });
 
+/**
+ * GET: Single Product by ID
+ */
+router.get("/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid product ID" });
+
+    db.get("SELECT * FROM products WHERE id = ?", [id], (err, row) => {
+      if (err) {
+        console.error("Fetch single product error:", err);
+        return res.status(500).json({ message: "DB error", detail: err.message });
+      }
+      if (!row) return res.status(404).json({ message: "Product not found" });
+      return res.json(row);
+    });
+  } catch (ex) {
+    console.error("Unhandled error in GET /admin/products/:id:", ex);
+    res.status(500).json({ message: "Server error", detail: ex.message });
+  }
+});
+
 // PUT: Update subcategory
 router.put("/categories/:id", (req, res) => {
   const { subcategory, slug, status, sort_order, parent_id, metadata } = req.body;
@@ -504,4 +506,5 @@ router.delete("/categories/:id", (req, res) => {
 
 
 export default router;
+
 
