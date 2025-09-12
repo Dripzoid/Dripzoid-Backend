@@ -5,24 +5,28 @@ import path from "path";
 import fs from "fs";
 import csvParser from "csv-parser";
 import sqlite3 from "sqlite3";
+import dotenv from "dotenv";
 import { fileURLToPath } from "url";
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
+// Use DATABASE_FILE from .env or fallback to local file
+const dbPath = process.env.DATABASE_FILE || path.resolve(__dirname, "./dripzoid.db");
+
 // SQLite connection
-const db = new sqlite3.Database(
-  path.resolve(__dirname, "./dripzoid.db"),
-  (err) => {
-    if (err) {
-      console.error("❌ SQLite connection error:", err.message);
-    } else {
-      console.log("✅ Connected to SQLite for admin products");
-    }
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error("❌ SQLite connection error:", err.message);
+  } else {
+    console.log("✅ Connected to SQLite at:", dbPath);
   }
-);
+});
+
 
 // Multer config
 const uploadsDir = path.resolve(__dirname, "../uploads");
@@ -506,5 +510,6 @@ router.delete("/categories/:id", (req, res) => {
 
 
 export default router;
+
 
 
