@@ -2,16 +2,19 @@ import sqlite3 from "sqlite3";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Path to your database file
-const dbPath = path.join(__dirname, "dripzoid.db");
+// Use DATABASE_FILE from .env or fallback to local file
+const dbPath = process.env.DATABASE_FILE || path.join(__dirname, "dripzoid.db");
 
-// ✅ Check if the DB file exists before connecting
+// ✅ Check if the DB file exists before connecting (optional on first run)
 if (!fs.existsSync(dbPath)) {
-  throw new Error(`❌ Database file not found at: ${dbPath}`);
+  console.warn(`⚠️ Database file not found at: ${dbPath} — a new one will be created.`);
 }
 
 const db = new sqlite3.Database(dbPath, (err) => {
