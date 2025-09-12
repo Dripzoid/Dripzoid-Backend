@@ -465,6 +465,33 @@ router.get("/:id", (req, res) => {
   }
 });
 
+router.put("/categories/:id/status", (req, res) => {
+  const { status } = req.body;
+
+  db.run(
+    `UPDATE categories 
+     SET status = ?, updated_at = datetime('now') 
+     WHERE id = ?`,
+    [status, req.params.id],
+    function (err) {
+      if (err) {
+        console.error("Update status error:", err);
+        return res.status(500).json({ message: "DB update error", detail: err.message });
+      }
+      if (this.changes === 0) return res.status(404).json({ message: "Category not found" });
+
+      db.get("SELECT * FROM categories WHERE id = ?", [req.params.id], (err2, row) => {
+        if (err2) {
+          console.error("Fetch updated category error:", err2);
+          return res.status(500).json({ message: "DB read error", detail: err2.message });
+        }
+        return res.json(row);
+      });
+    }
+  );
+});
+
+
 // PUT: Update subcategory
 router.put("/categories/:id", (req, res) => {
   const { subcategory, slug, status, sort_order, parent_id, metadata } = req.body;
@@ -510,6 +537,7 @@ router.delete("/categories/:id", (req, res) => {
 
 
 export default router;
+
 
 
 
