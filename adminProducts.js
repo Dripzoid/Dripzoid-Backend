@@ -393,4 +393,115 @@ router.get("/:id", (req, res) => {
   }
 });
 
+/**
+ * ================================
+ * CATEGORY ROUTES
+ * ================================
+ */
+
+// GET: All categories grouped by main category
+router.get("/categories", (req, res) => {
+  const sql = `
+    SELECT id, category, subcategory, slug, status, sort_order,
+           parent_id, metadata, is_deleted, created_at, updated_at
+    FROM categories
+    WHERE is_deleted = 0
+    ORDER BY category, sort_order, subcategory
+  `;
+  db.all(sql, [], (err, rows) => {
+    if (err) {
+      console.error("Fetch categories error:", err);
+      return res.status(500).json({ message: "DB error", detail: err.message });
+    }
+    return res.json(rows || []);
+  });
+});
+
+// POST: Add new subcategory
+router.post("/categories", (req, res) => {
+  try {
+    const {
+      category,       // Must be Men | Women | Kids
+      subcategory,
+      slug,
+      status = "active",
+      sort_order = 0,
+      parent_id = null,
+      metadata = "{}",
+    } = req.body;
+
+    if (!category || !subcategory) {
+      return res.status(400).json({ message: "Category and subcategory are required" });
+    }
+
+    const sql = `
+      INSERT INTO categories 
+        (category, subcategory, slug, status, sort_order, parent_id, metadata, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `;
+
+    db.run(sql, [category, subcategory, slug, status, sort_order, parent_id, metadata], function (err) {
+      if (err) {
+        console.error("Insert category error:", err);
+        return res.status(500).json({ message: "DB insert error", detail: err.message });
+      }
+      db.get("SELECT * FROM categories WHERE id = ?", [this.lastID], (err2, row) => {
+        if (err2) {
+          console.error("Fetch new category error:", err2);
+          return res.status(500).json({ message: "DB read error", detail: err2.message });
+        }
+        return res.json(row);
+      });
+    });
+  } catch (ex) {
+    console.error("Unhandled error in POST /admin/categories:", ex);
+    res.status(500).json({ message: "Server error", detail: ex.message });
+  }
+});
+
+// PUT: Update subcategory
+router.put("/categories/:id", (req, res) => {
+  const { subcategory, slug, status, sort_order, parent_id, metadata } = req.body;
+
+  db.run(
+    `UPDATE categories
+     SET subcategory = ?, slug = ?, status = ?, sort_order = ?, parent_id = ?, metadata = ?, updated_at = datetime('now')
+     WHERE id = ?`,
+    [subcategory, slug, status, sort_order, parent_id, metadata, req.params.id],
+    function (err) {
+      if (err) {
+        console.error("Update category error:", err);
+        return res.status(500).json({ message: "DB update error", detail: err.message });
+      }
+      if (this.changes === 0) return res.status(404).json({ message: "Category not found" });
+
+      db.get("SELECT * FROM categories WHERE id = ?", [req.params.id], (err2, row) => {
+        if (err2) {
+          console.error("Fetch updated category error:", err2);
+          return res.status(500).json({ message: "DB read error", detail: err2.message });
+        }
+        return res.json(row);
+      });
+    }
+  );
+});
+
+// DELETE: Soft delete category
+router.delete("/categories/:id", (req, res) => {
+  db.run(
+    "UPDATE categories SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?",
+    [req.params.id],
+    function (err) {
+      if (err) {
+        console.error("Delete category error:", err);
+        return res.status(500).json({ message: "DB delete error", detail: err.message });
+      }
+      if (this.changes === 0) return res.status(404).json({ message: "Category not found" });
+      return res.json({ id: req.params.id, message: "✅ Category soft-deleted" });
+    }
+  );
+});
+
+
 export default router;
+
