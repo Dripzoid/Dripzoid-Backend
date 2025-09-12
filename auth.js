@@ -5,6 +5,9 @@ import jwt from "jsonwebtoken";
 import sqlite3 from "sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const router = express.Router();
 
@@ -12,8 +15,9 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Connect to DB
-const DB_PATH = path.join(__dirname, "./dripzoid.db");
+// Use DATABASE_FILE from .env or fallback to local file
+const DB_PATH = process.env.DATABASE_FILE || path.join(__dirname, "./dripzoid.db");
+
 const DB = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
     console.error("❌ Failed to connect to database:", err.message);
@@ -145,3 +149,4 @@ router.post("/login", (req, res) => {
 });
 
 export default router;
+
