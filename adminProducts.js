@@ -31,21 +31,6 @@ const upload = multer({ dest: uploadsDir });
 
 /**
  * GET: All Products (paginated, search, sorting)
- *
- * Supported sort values:
- * - newest         -> updated_at DESC
- * - price_asc      -> price ASC
- * - price_desc     -> price DESC
- * - best_selling   -> COALESCE(sold,0) DESC
- * - out_of_stock   -> filter WHERE stock = 0
- * - low_stock      -> ORDER BY stock ASC (optionally filter by low_stock_threshold)
- *
- * Query params:
- * - search (string)
- * - sort (string)
- * - page (number)
- * - limit (number) - pass 999999 to "show all"
- * - low_stock_threshold (optional number)
  */
 router.get("/", (req, res) => {
   try {
@@ -57,7 +42,6 @@ router.get("/", (req, res) => {
     const offset = limit ? (page - 1) * limit : 0;
     const like = `%${search}%`;
 
-    // Whitelist order clauses
     const ORDER_MAP = {
       newest: "updated_at DESC",
       price_asc: "price ASC",
@@ -68,13 +52,10 @@ router.get("/", (req, res) => {
 
     const isOutOfStockFilter = sort === "out_of_stock";
     const orderClause = ORDER_MAP[sort] || ORDER_MAP.newest;
-
-    // Optionally treat low_stock with threshold filter (if provided)
     const lowStockThreshold = typeof req.query.low_stock_threshold !== "undefined"
       ? Number(req.query.low_stock_threshold)
       : null;
 
-    // Build WHERE clause safely with params
     let whereSQL = `WHERE (name LIKE ? OR category LIKE ? OR subcategory LIKE ?)`;
     const params = [like, like, like];
 
@@ -83,14 +64,13 @@ router.get("/", (req, res) => {
     }
 
     if (sort === "low_stock" && Number.isFinite(lowStockThreshold)) {
-      // When threshold provided, filter to stock <= threshold (useful)
       whereSQL += ` AND stock <= ?`;
       params.push(lowStockThreshold);
     }
 
-    // SELECT clause (include sold fallback and colors)
     const selectSQL = `
-      SELECT id, name, category, subcategory, price, images, colors, stock, rating, updated_at, COALESCE(sold,0) AS sold
+      SELECT id, name, category, subcategory, price, actualPrice, images, colors,
+             stock, rating, updated_at, COALESCE(sold,0) AS sold, featured
       FROM products
       ${whereSQL}
       ORDER BY ${orderClause}
@@ -140,18 +120,19 @@ router.post("/", (req, res) => {
       name,
       category,
       price,
+      actualPrice,
       images,
       rating,
       sizes,
-      colors, // prefer plural
-      color,  // accept legacy singular if provided
+      colors,
+      color,
       originalPrice,
       description,
       subcategory,
       stock,
+      featured,
     } = req.body;
 
-    // backward-compatible: accept either 'colors' or 'color'
     colors = (colors || color || "").toString();
 
     if (!name || !category || price == null) {
@@ -159,18 +140,22 @@ router.post("/", (req, res) => {
     }
 
     price = Number(price) || 0;
+    actualPrice = Number(actualPrice) || 0;
     rating = Number(rating) || 0;
     originalPrice = Number(originalPrice) || 0;
     stock = Number(stock) || 0;
+    featured = Number(featured) || 0;
 
     db.run(
       `INSERT INTO products 
-        (name, category, price, images, rating, sizes, colors, originalPrice, description, subcategory, stock, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        (name, category, price, actualPrice, images, rating, sizes, colors,
+         originalPrice, description, subcategory, stock, featured, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
       [
         name.trim(),
         category.trim(),
         price,
+        actualPrice,
         images || "",
         rating,
         sizes || "",
@@ -179,6 +164,7 @@ router.post("/", (req, res) => {
         description || "",
         subcategory || "",
         stock,
+        featured,
       ],
       function (err) {
         if (err) {
@@ -210,33 +196,38 @@ router.put("/:id", (req, res) => {
       name,
       category,
       price,
+      actualPrice,
       images,
       rating,
       sizes,
-      colors, // prefer plural
-      color,  // accept legacy singular if provided
+      colors,
+      color,
       originalPrice,
       description,
       subcategory,
       stock,
+      featured,
     } = req.body;
 
-    // backward-compatible: accept either 'colors' or 'color'
     colors = (colors || color || "").toString();
 
     price = Number(price) || 0;
+    actualPrice = Number(actualPrice) || 0;
     rating = Number(rating) || 0;
     originalPrice = Number(originalPrice) || 0;
     stock = Number(stock) || 0;
+    featured = Number(featured) || 0;
 
     db.run(
       `UPDATE products
-       SET name = ?, category = ?, price = ?, images = ?, rating = ?, sizes = ?, colors = ?, originalPrice = ?, description = ?, subcategory = ?, stock = ?, updated_at = datetime('now')
+       SET name = ?, category = ?, price = ?, actualPrice = ?, images = ?, rating = ?, sizes = ?,
+           colors = ?, originalPrice = ?, description = ?, subcategory = ?, stock = ?, featured = ?, updated_at = datetime('now')
        WHERE id = ?`,
       [
         (name || "").trim(),
         (category || "").trim(),
         price,
+        actualPrice,
         images || "",
         rating,
         sizes || "",
@@ -245,6 +236,7 @@ router.put("/:id", (req, res) => {
         description || "",
         subcategory || "",
         stock,
+        featured,
         req.params.id,
       ],
       function (err) {
@@ -306,15 +298,16 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         name: row.name.trim(),
         category: row.category.trim(),
         price: Number(row.price) || 0,
+        actualPrice: Number(row.actualPrice) || 0,
         images: row.images || "",
         rating: Number(row.rating) || 0,
         sizes: row.sizes || "",
-        // Accept both 'colors' and legacy 'color' column names in CSV
         colors: row.colors || row.color || "",
         originalPrice: Number(row.originalPrice) || 0,
         description: row.description || "",
         subcategory: row.subcategory || "",
         stock: Number(row.stock) || 0,
+        featured: Number(row.featured) || 0,
       });
     })
     .on("end", () => {
@@ -323,13 +316,13 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         return res.status(400).json({ message: "CSV contains no valid product data" });
       }
 
-      // Insert in a transaction
       db.serialize(() => {
         db.run("BEGIN TRANSACTION");
         const stmt = db.prepare(
           `INSERT INTO products 
-            (name, category, price, images, rating, sizes, colors, originalPrice, description, subcategory, stock, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+            (name, category, price, actualPrice, images, rating, sizes, colors,
+             originalPrice, description, subcategory, stock, featured, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
         );
 
         for (const p of products) {
@@ -337,6 +330,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
             p.name,
             p.category,
             p.price,
+            p.actualPrice,
             p.images,
             p.rating,
             p.sizes,
@@ -345,6 +339,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
             p.description,
             p.subcategory,
             p.stock,
+            p.featured,
           ]);
         }
 
