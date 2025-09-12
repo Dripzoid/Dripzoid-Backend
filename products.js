@@ -2,18 +2,25 @@ import express from "express";
 import path from "path";
 import sqlite3 from "sqlite3";
 import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const router = express.Router();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbPath = path.join(__dirname, "./dripzoid.db"); 
+
+// ✅ Use env var or fallback to local file
+const dbPath = process.env.DATABASE_FILE || path.join(__dirname, "./dripzoid.db");
 
 const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) console.error("❌ Products router DB error:", err.message);
-  else console.log("✅ Products router connected to DB:", dbPath);
+  if (err) {
+    console.error("❌ Products router DB error:", err.message);
+  } else {
+    console.log("✅ Products router connected to DB:", dbPath);
+  }
 });
-
 const DEFAULT_LIMIT = 16;
 
 const csvToArray = (v) => {
@@ -325,4 +332,5 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
+
 
