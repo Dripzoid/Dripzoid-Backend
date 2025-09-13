@@ -133,8 +133,11 @@ router.get("/", (req, res) => {
   console.log("Parsed categories:", categoriesArr);
 
   // WHERE clause pieces
-  const whereParts = ["1=1"];
+  const whereParts = [];
   const params = [];
+
+  // ✅ Always exclude products without a valid price
+  whereParts.push("price IS NOT NULL");
 
   // category filter (plain category names)
   if (categoriesArr && categoriesArr.length) {
@@ -154,7 +157,6 @@ router.get("/", (req, res) => {
       ( (category = ? AND subcategory = ?) OR (category = ? AND subcategory = ?) OR subcategory IN (?,?) )
   */
   if (subcategoriesArr && subcategoriesArr.length) {
-    // decode entries safely (in case frontend encoded them)
     const decodedEntries = subcategoriesArr.map((entry) => {
       try {
         return decodeURIComponent(String(entry));
@@ -169,15 +171,14 @@ router.get("/", (req, res) => {
     const orParts = [];
 
     if (pairEntries.length) {
-      // build "(category = ? AND subcategory = ?)" for each pair
-      const pairClauseParts = pairEntries.map(() => "(category COLLATE NOCASE = ? AND subcategory COLLATE NOCASE = ?)");
+      const pairClauseParts = pairEntries.map(
+        () => "(category COLLATE NOCASE = ? AND subcategory COLLATE NOCASE = ?)"
+      );
       orParts.push(...pairClauseParts);
+
       pairEntries.forEach((rawPair) => {
         const [rawCat = "", rawSub = ""] = String(rawPair).split(":");
-        const cat = rawCat.trim();
-        const sub = rawSub.trim();
-        params.push(cat);
-        params.push(sub);
+        params.push(rawCat.trim(), rawSub.trim());
       });
     }
 
@@ -199,6 +200,7 @@ router.get("/", (req, res) => {
     params.push(...colorsArr);
   }
 
+  // ✅ Price filtering (only price, ignore originalPrice)
   if (minPrice) {
     whereParts.push("price >= ?");
     params.push(parseFloat(minPrice));
@@ -209,6 +211,7 @@ router.get("/", (req, res) => {
     params.push(parseFloat(maxPrice));
   }
 
+  // ✅ Search
   if (searchQuery) {
     whereParts.push("(name LIKE ? OR description LIKE ?)");
     params.push(`%${searchQuery}%`, `%${searchQuery}%`);
@@ -267,7 +270,8 @@ router.get("/", (req, res) => {
     const pages = finalLimit > 0 ? Math.ceil(total / finalLimit) : 1;
 
     const sql = `
-      SELECT id, name, category, subcategory, colors, images, price, originalPrice, rating, description, stock
+      SELECT id, name, category, subcategory, colors, images,
+             price, originalPrice, rating, description, stock
       FROM products
       ${whereClause}
       ${orderBy}
@@ -304,6 +308,7 @@ router.get("/", (req, res) => {
     });
   });
 });
+
 
 /* -------------------- COLORS LIST -------------------- */
 router.get("/colors", (req, res) => {
@@ -433,3 +438,4 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
+
