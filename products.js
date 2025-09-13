@@ -260,6 +260,63 @@ router.get("/", (req, res) => {
   });
 });
 
+/* -------------------- COLORS LIST -------------------- */
+router.get("/colors", (req, res) => {
+  const sql = `SELECT DISTINCT colors FROM products WHERE colors IS NOT NULL AND TRIM(colors) != ''`;
+
+  db.all(sql, [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    let allColors = [];
+    rows.forEach((r) => {
+      if (!r.colors) return;
+      try {
+        const parsed = JSON.parse(r.colors);
+        if (Array.isArray(parsed)) {
+          allColors.push(...parsed.map((c) => String(c).trim()).filter(Boolean));
+        } else if (typeof parsed === "string") {
+          allColors.push(parsed.trim());
+        }
+      } catch {
+        allColors.push(...r.colors.split(",").map((c) => c.trim()).filter(Boolean));
+      }
+    });
+
+    // Deduplicate
+    const uniqueColors = [...new Set(allColors)];
+    res.json({ colors: uniqueColors });
+  });
+});
+
+/* -------------------- CATEGORIES + SUBCATEGORIES -------------------- */
+router.get("/categories", (req, res) => {
+  const sql = `SELECT DISTINCT category, subcategory FROM products 
+               WHERE category IS NOT NULL AND TRIM(category) != ''`;
+
+  db.all(sql, [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    // group subcategories under each category
+    const categoriesMap = {};
+    rows.forEach(({ category, subcategory }) => {
+      const cat = category?.trim() || "Uncategorized";
+      const sub = subcategory?.trim() || "General";
+      if (!categoriesMap[cat]) {
+        categoriesMap[cat] = new Set();
+      }
+      categoriesMap[cat].add(sub);
+    });
+
+    const categories = Object.entries(categoriesMap).map(([name, subs]) => ({
+      name,
+      subcategories: [...subs],
+    }));
+
+    res.json({ categories });
+  });
+});
+
+
 /* -------------------- GET SINGLE PRODUCT BY ID -------------------- */
 const parseField = (field) => {
   if (!field) return [];
@@ -332,5 +389,6 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
+
 
 
