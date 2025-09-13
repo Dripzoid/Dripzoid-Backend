@@ -120,10 +120,10 @@ router.get("/", (req, res) => {
 
   const searchQuery = (search || q || "").trim();
 
-  // normalize categories
+  // normalize categories (client might pass category names)
   let categoriesArr = csvToArray(category) || null;
   if (categoriesArr) {
-    categoriesArr = categoriesArr.map((c) => c.charAt(0).toUpperCase() + c.slice(1).toLowerCase());
+    categoriesArr = categoriesArr.map((c) => String(c).trim());
   }
 
   const subcategoriesArr = csvToArray(subcategory);
@@ -132,22 +132,67 @@ router.get("/", (req, res) => {
   console.log("🔍 Products query:", req.query);
   console.log("Parsed categories:", categoriesArr);
 
-  // WHERE clause
+  // WHERE clause pieces
   const whereParts = ["1=1"];
   const params = [];
 
+  // category filter (plain category names)
   if (categoriesArr && categoriesArr.length) {
     const placeholders = categoriesArr.map(() => "?").join(",");
     whereParts.push(`category COLLATE NOCASE IN (${placeholders})`);
     params.push(...categoriesArr);
   }
 
+  /*
+    Subcategory handling:
+
+    Accepts:
+      - plain subcategory names: ?subcategory=Shirts,Pants
+      - category-scoped pairs: ?subcategory=Men:Shirts,Kids:Shirt
+
+    The SQL generated will be an OR-group like:
+      ( (category = ? AND subcategory = ?) OR (category = ? AND subcategory = ?) OR subcategory IN (?,?) )
+  */
   if (subcategoriesArr && subcategoriesArr.length) {
-    const placeholders = subcategoriesArr.map(() => "?").join(",");
-    whereParts.push(`subcategory COLLATE NOCASE IN (${placeholders})`);
-    params.push(...subcategoriesArr);
+    // decode entries safely (in case frontend encoded them)
+    const decodedEntries = subcategoriesArr.map((entry) => {
+      try {
+        return decodeURIComponent(String(entry));
+      } catch {
+        return String(entry);
+      }
+    });
+
+    const pairEntries = decodedEntries.filter((s) => String(s).includes(":"));
+    const simpleSubs = decodedEntries.filter((s) => !String(s).includes(":"));
+
+    const orParts = [];
+
+    if (pairEntries.length) {
+      // build "(category = ? AND subcategory = ?)" for each pair
+      const pairClauseParts = pairEntries.map(() => "(category COLLATE NOCASE = ? AND subcategory COLLATE NOCASE = ?)");
+      orParts.push(...pairClauseParts);
+      pairEntries.forEach((rawPair) => {
+        const [rawCat = "", rawSub = ""] = String(rawPair).split(":");
+        const cat = rawCat.trim();
+        const sub = rawSub.trim();
+        params.push(cat);
+        params.push(sub);
+      });
+    }
+
+    if (simpleSubs.length) {
+      const placeholders = simpleSubs.map(() => "?").join(",");
+      orParts.push(`subcategory COLLATE NOCASE IN (${placeholders})`);
+      params.push(...simpleSubs);
+    }
+
+    if (orParts.length) {
+      whereParts.push(`(${orParts.join(" OR ")})`);
+    }
   }
 
+  // colors (simple IN; depends on how you store colors in DB)
   if (colorsArr && colorsArr.length) {
     const placeholders = colorsArr.map(() => "?").join(",");
     whereParts.push(`colors COLLATE NOCASE IN (${placeholders})`);
@@ -316,7 +361,6 @@ router.get("/categories", (req, res) => {
   });
 });
 
-
 /* -------------------- GET SINGLE PRODUCT BY ID -------------------- */
 const parseField = (field) => {
   if (!field) return [];
@@ -389,6 +433,3 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
-
-
-
