@@ -116,6 +116,7 @@ router.get("/", (req, res) => {
     limit,
     search,
     q,
+    gender, // ✅ NEW
   } = req.query;
 
   const searchQuery = (search || q || "").trim();
@@ -124,6 +125,14 @@ router.get("/", (req, res) => {
   let categoriesArr = csvToArray(category) || null;
   if (categoriesArr) {
     categoriesArr = categoriesArr.map((c) => String(c).trim());
+  }
+
+  // ✅ Map gender → category filter
+  if (gender) {
+    const g = String(gender).trim().toLowerCase();
+    if (g === "men" || g === "man") categoriesArr = ["Men"];
+    else if (g === "women" || g === "woman") categoriesArr = ["Women"];
+    else if (g === "kids" || g === "kid" || g === "child") categoriesArr = ["Kids"];
   }
 
   const subcategoriesArr = csvToArray(subcategory);
@@ -146,16 +155,7 @@ router.get("/", (req, res) => {
     params.push(...categoriesArr);
   }
 
-  /*
-    Subcategory handling:
-
-    Accepts:
-      - plain subcategory names: ?subcategory=Shirts,Pants
-      - category-scoped pairs: ?subcategory=Men:Shirts,Kids:Shirt
-
-    The SQL generated will be an OR-group like:
-      ( (category = ? AND subcategory = ?) OR (category = ? AND subcategory = ?) OR subcategory IN (?,?) )
-  */
+  // --- Subcategory handling ---
   if (subcategoriesArr && subcategoriesArr.length) {
     const decodedEntries = subcategoriesArr.map((entry) => {
       try {
@@ -193,19 +193,18 @@ router.get("/", (req, res) => {
     }
   }
 
-  // colors (simple IN; depends on how you store colors in DB)
+  // colors filter
   if (colorsArr && colorsArr.length) {
     const placeholders = colorsArr.map(() => "?").join(",");
     whereParts.push(`colors COLLATE NOCASE IN (${placeholders})`);
     params.push(...colorsArr);
   }
 
-  // ✅ Price filtering (only price, ignore originalPrice)
+  // ✅ Price filtering
   if (minPrice) {
     whereParts.push("price >= ?");
     params.push(parseFloat(minPrice));
   }
-
   if (maxPrice) {
     whereParts.push("price <= ?");
     params.push(parseFloat(maxPrice));
@@ -455,6 +454,7 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
+
 
 
 
