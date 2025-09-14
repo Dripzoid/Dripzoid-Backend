@@ -1,4 +1,4 @@
-import express from "express";
+  import express from "express";
 import path from "path";
 import sqlite3 from "sqlite3";
 import { fileURLToPath } from "url";
@@ -340,17 +340,13 @@ router.get("/colors", (req, res) => {
 
 /* -------------------- CATEGORIES + SUBCATEGORIES -------------------- */
 router.get("/categories", (req, res) => {
-  const { gender, category } = req.query;
+  const { category } = req.query; // example: category=Men or Women
 
   const whereParts = ["category IS NOT NULL", "TRIM(category) != ''"];
   const params = [];
 
-  if (gender) {
-    whereParts.push("gender COLLATE NOCASE = ?");
-    params.push(gender);
-  }
-
   if (category) {
+    // filter for category like 'Men' or 'Women'
     whereParts.push("category COLLATE NOCASE = ?");
     params.push(category);
   }
@@ -459,5 +455,6 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
+
 
 
