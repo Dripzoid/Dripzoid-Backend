@@ -340,10 +340,30 @@ router.get("/colors", (req, res) => {
 
 /* -------------------- CATEGORIES + SUBCATEGORIES -------------------- */
 router.get("/categories", (req, res) => {
-  const sql = `SELECT DISTINCT category, subcategory FROM products 
-               WHERE category IS NOT NULL AND TRIM(category) != ''`;
+  const { gender, category } = req.query;
 
-  db.all(sql, [], (err, rows) => {
+  const whereParts = ["category IS NOT NULL", "TRIM(category) != ''"];
+  const params = [];
+
+  if (gender) {
+    whereParts.push("gender COLLATE NOCASE = ?");
+    params.push(gender);
+  }
+
+  if (category) {
+    whereParts.push("category COLLATE NOCASE = ?");
+    params.push(category);
+  }
+
+  const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
+  const sql = `
+    SELECT DISTINCT category, subcategory
+    FROM products
+    ${whereClause}
+  `;
+
+  db.all(sql, params, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
 
     // group subcategories under each category
@@ -365,6 +385,7 @@ router.get("/categories", (req, res) => {
     res.json({ categories });
   });
 });
+
 
 /* -------------------- GET SINGLE PRODUCT BY ID -------------------- */
 const parseField = (field) => {
@@ -438,4 +459,5 @@ router.get("/related/:id", (req, res) => {
 });
 
 export default router;
+
 
