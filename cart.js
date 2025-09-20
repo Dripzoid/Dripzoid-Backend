@@ -19,13 +19,16 @@ const db = new sqlite3.Database(dbPath, (err) => {
   else console.log("✅ Connected to SQLite at:", dbPath);
 });
 
+// Use env JWT secret if provided for flexibility
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_KEY || "Dripzoid.App@2025";
+
 // Middleware: JWT authentication
 function authenticateToken(req, res, next) {
   const authHeader = req.headers["authorization"];
   if (!authHeader?.startsWith("Bearer ")) return res.sendStatus(401);
 
   const token = authHeader.split(" ")[1];
-  jwt.verify(token, "Dripzoid.App@2025", (err, user) => {
+  jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.sendStatus(403);
     req.user = user;
     next();
@@ -33,26 +36,122 @@ function authenticateToken(req, res, next) {
 }
 
 /**
- * Helper: Map images to selected color based on product colors order
- * Assumes:
- *   - colors = array of colors in product
- *   - images = array of image URLs in order
- * Logic: divide images equally among colors, pick images for selectedColor
+ * Utility: parseImagesField
+ * Accepts possible shapes:
+ *   - JSON array string: '["url1","url2"]'
+ *   - comma-separated string: "url1,url2"
+ *   - actual array
+ *   - null/undefined
+ * Returns an array of trimmed non-empty URLs.
+ */
+function parseImagesField(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter(Boolean).map(String);
+  if (typeof raw !== "string") return [];
+
+  const s = raw.trim();
+  if (!s) return [];
+
+  // try JSON parse first
+  try {
+    const parsed = JSON.parse(s);
+    if (Array.isArray(parsed)) return parsed.filter(Boolean).map(String);
+  } catch {
+    // ignore
+  }
+
+  // fallback to comma-separated
+  return s
+    .split(",")
+    .map((p) => String(p || "").trim())
+    .filter(Boolean);
+}
+
+/**
+ * Utility: parseColorsField
+ * Similar to parseImagesField (accepts JSON array string or CSV or array)
+ * Returns normalized array of color strings.
+ */
+function parseColorsField(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map((c) => String(c || "").trim()).filter(Boolean);
+  if (typeof raw !== "string") return [];
+  const s = raw.trim();
+  if (!s) return [];
+  try {
+    const parsed = JSON.parse(s);
+    if (Array.isArray(parsed)) return parsed.map((c) => String(c || "").trim()).filter(Boolean);
+  } catch {
+    // ignore
+  }
+  // fallback CSV (split by comma)
+  return s
+    .split(",")
+    .map((c) => String(c || "").trim())
+    .filter(Boolean);
+}
+
+/**
+ * Helper: Map images to selected color based on product colors order.
+ * Distribution strategy:
+ *   - If images.length === colors.length: 1 image per color
+ *   - Otherwise, compute base = Math.floor(nImgs / nColors), remainder = nImgs % nColors,
+ *     then first `remainder` colors get (base + 1) images, remaining get base images.
+ *   - This mirrors the approach in the frontend.
+ * If selectedColor not found (case-insensitive), fallback to:
+ *   - images for first color (if any) OR the entire images array.
  */
 function getImagesForColor(images, colors = [], selectedColor) {
-  if (!images || images.length === 0 || !colors || colors.length === 0) return [];
+  if (!Array.isArray(images) || images.length === 0) return [];
+  if (!Array.isArray(colors) || colors.length === 0) {
+    // No color meta — return all images
+    return images;
+  }
 
-  const imagesPerColor = Math.floor(images.length / colors.length) || 1;
-  const colorIndex = colors.findIndex((c) => c.toLowerCase() === (selectedColor?.toLowerCase() || ""));
-  if (colorIndex === -1) return images.slice(0, imagesPerColor); // fallback: first color
+  const nImgs = images.length;
+  const nColors = colors.length;
 
-  const start = colorIndex * imagesPerColor;
-  const end = start + imagesPerColor;
+  // compute counts per color (handles remainder)
+  const base = Math.floor(nImgs / nColors);
+  let remainder = nImgs % nColors;
+
+  // build counts array where counts[i] = number of images for colors[i]
+  const counts = new Array(nColors).fill(base).map((v, i) => {
+    if (remainder > 0) {
+      remainder -= 1;
+      return v + 1;
+    }
+    return v;
+  });
+
+  // build index offsets by summing counts
+  const offsets = [];
+  let acc = 0;
+  for (let i = 0; i < counts.length; i++) {
+    offsets.push(acc);
+    acc += counts[i];
+  }
+
+  // find color index case-insensitively (trimmed)
+  const target = (selectedColor || "").toString().trim().toLowerCase();
+  const colorIndex = colors.findIndex((c) => String(c || "").trim().toLowerCase() === target);
+
+  const idx = colorIndex >= 0 ? colorIndex : 0; // fallback to first color
+  const start = offsets[idx] || 0;
+  const count = counts[idx] || 0;
+
+  // slice safely
+  const end = Math.min(start + count, images.length);
+  if (start >= images.length || count === 0) {
+    // fallback to whole images
+    return images.slice(0);
+  }
   return images.slice(start, end);
 }
 
 /**
  * GET /api/cart
+ * Returns cart items with product details and images filtered to selectedColor.
  */
 router.get("/", authenticateToken, (req, res) => {
   const sql = `
@@ -76,21 +175,11 @@ router.get("/", authenticateToken, (req, res) => {
     if (err) return res.status(500).json({ error: err.message });
 
     const mapped = rows.map((row) => {
-      let images = [];
-      try {
-        images = typeof row.images === "string" ? JSON.parse(row.images) : row.images;
-      } catch (e) {
-        images = [];
-      }
+      // parse product images and colors robustly
+      const images = parseImagesField(row.images);
+      const colors = parseColorsField(row.colors);
 
-      let colors = [];
-      try {
-        colors = typeof row.colors === "string" ? JSON.parse(row.colors) : row.colors;
-      } catch (e) {
-        colors = [];
-      }
-
-      const filteredImages = getImagesForColor(images, colors, row.selectedColor);
+      const imagesForSelected = getImagesForColor(images, colors, row.selectedColor);
 
       return {
         cart_id: row.cart_id,
@@ -100,17 +189,18 @@ router.get("/", authenticateToken, (req, res) => {
         selectedColor: row.selectedColor,
         name: row.name,
         price: row.price,
-        images: filteredImages,
+        images: imagesForSelected,
         stock: row.stock,
       };
     });
 
-    res.json(mapped);
+    return res.json(mapped);
   });
 });
 
 /**
  * POST /api/cart
+ * Adds an item to the cart — validates product exists first
  */
 router.post("/", authenticateToken, (req, res) => {
   const { product_id, quantity = 1, selectedSize = null, selectedColor = null } = req.body;
@@ -135,6 +225,7 @@ router.post("/", authenticateToken, (req, res) => {
 
 /**
  * PUT /api/cart/:id
+ * Updates quantity for a cart item
  */
 router.put("/:id", authenticateToken, (req, res) => {
   const { quantity } = req.body;
@@ -150,6 +241,7 @@ router.put("/:id", authenticateToken, (req, res) => {
 
 /**
  * DELETE /api/cart/:id
+ * Removes a cart item
  */
 router.delete("/:id", authenticateToken, (req, res) => {
   db.run(
