@@ -43,43 +43,70 @@ const allQuery = (sql, params = []) =>
  *  - Starts transaction, inserts order + order_items, updates stock, deletes processed cart rows (only)
  */
 router.post("/place-order", auth, async (req, res) => {
-  const { cartItems = [], items = [], buyNow = false, shippingAddress, paymentMethod, paymentDetails, totalAmount } = req.body;
+  const {
+    cartItems = [],
+    items = [],
+    buyNow = false,
+    shippingAddress,
+    paymentMethod,
+    paymentDetails,
+    totalAmount,
+  } = req.body;
+
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
   const cartItemsArr = Array.isArray(cartItems) ? cartItems : [];
   const itemsArr = Array.isArray(items) ? items : [];
 
+  // --- Helper: normalize shipping address ---
+  const normalizeAddress = (addr) => {
+    if (!addr) return {};
+    return {
+      id: addr.id ?? null,
+      label: addr.label ?? addr.name ?? null,
+      line1: addr.line1 ?? addr.address_line1 ?? addr.address1 ?? null,
+      line2: addr.line2 ?? addr.address_line2 ?? addr.address2 ?? null,
+      city: addr.city ?? null,
+      state: addr.state ?? null,
+      pincode: addr.pincode ?? addr.zip ?? addr.postcode ?? null,
+      country: addr.country ?? "India",
+      phone: addr.phone ?? null,
+    };
+  };
+
+  const shippingAddrNormalized = normalizeAddress(shippingAddress);
+
   try {
+    await runQuery("BEGIN TRANSACTION");
+
     // ---------- BUY NOW FLOW ----------
     if (buyNow) {
       if (!itemsArr.length) {
+        await runQuery("ROLLBACK");
         return res.status(400).json({ error: "No items provided for buy-now" });
       }
 
-      // Validate products exist and stock
+      // Validate stock for each item
       for (const it of itemsArr) {
         const productId = it.product_id ?? it.product?.id ?? it.product_snapshot?.id ?? null;
         const qty = Number(it.quantity ?? 1);
-        if (!productId) return res.status(400).json({ error: "Missing product_id in buy-now item" });
-        if (!Number.isFinite(qty) || qty <= 0) return res.status(400).json({ error: `Invalid quantity for product ${productId}` });
+        if (!productId) throw new Error("Missing product_id in buy-now item");
+        if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Invalid quantity for product ${productId}`);
 
         const product = await getQuery(`SELECT * FROM products WHERE id = ?`, [productId]);
-        if (!product) return res.status(404).json({ error: `Product not found: ${productId}` });
-        if (product.stock !== null && product.stock !== undefined && Number(product.stock) < qty) {
-          return res.status(400).json({ error: `Insufficient stock for product ${productId}` });
-        }
+        if (!product) throw new Error(`Product not found: ${productId}`);
+        if (product.stock !== null && Number(product.stock) < qty) throw new Error(`Insufficient stock for product ${productId}`);
       }
-
-      await runQuery("BEGIN TRANSACTION");
 
       const orderInsert = await runQuery(
         `INSERT INTO orders 
-          (user_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'Confirmed', datetime('now', 'localtime'))`,
+          (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', datetime('now', 'localtime'))`,
         [
           userId,
-          JSON.stringify(shippingAddress || {}),
+          shippingAddrNormalized.id, // store address_id if available
+          JSON.stringify(shippingAddrNormalized), // normalized JSON
           paymentMethod || "",
           JSON.stringify(paymentDetails || {}),
           totalAmount ?? 0,
@@ -87,6 +114,7 @@ router.post("/place-order", auth, async (req, res) => {
       );
       const orderId = orderInsert.lastID;
 
+      // Insert order items & update stock
       for (const it of itemsArr) {
         const productId = it.product_id ?? it.product?.id ?? it.product_snapshot?.id;
         const qty = Number(it.quantity ?? 1);
@@ -101,7 +129,7 @@ router.post("/place-order", auth, async (req, res) => {
 
         const upd = await runQuery(
           `UPDATE products
-           SET stock = stock - ?, sold = COALESCE(sold, 0) + ?
+           SET stock = stock - ?, sold = COALESCE(sold,0) + ?
            WHERE id = ? AND (stock IS NULL OR stock >= ?)`,
           [qty, qty, productId, qty]
         );
@@ -117,6 +145,7 @@ router.post("/place-order", auth, async (req, res) => {
 
     // ---------- CART FLOW ----------
     if (!cartItemsArr.length) {
+      await runQuery("ROLLBACK");
       return res.status(400).json({ error: "No cart items provided" });
     }
 
@@ -124,77 +153,36 @@ router.post("/place-order", auth, async (req, res) => {
     const validatedItems = [];
 
     for (const item of cartItemsArr) {
-      if (item.id !== undefined && item.id !== null) {
-        const providedId = Number(item.id);
-        let cartEntry = await getQuery(
-          `SELECT * FROM cart_items WHERE id = ? AND user_id = ?`,
-          [providedId, userId]
-        );
-        if (!cartEntry) {
-          cartEntry = await getQuery(
-            `SELECT * FROM cart_items WHERE product_id = ? AND user_id = ?`,
-            [providedId, userId]
-          );
-        }
-        if (!cartEntry) {
-          return res.status(400).json({ error: `Cart item not found or not owned by user: ${item.id}` });
-        }
-        const qty = Number(item.quantity ?? cartEntry.quantity ?? 1);
-        const productId = cartEntry.product_id;
-        const product = await getQuery(`SELECT * FROM products WHERE id = ?`, [productId]);
-        if (!product) return res.status(404).json({ error: `Product not found: ${productId}` });
-        if (product.stock !== null && product.stock !== undefined && Number(product.stock) < qty) {
-          return res.status(400).json({ error: `Insufficient stock for product ${productId}` });
-        }
-        validatedItems.push({ 
-          product_id: productId, 
-          quantity: qty, 
-          cart_id: cartEntry.id,
-          selectedColor: item.selectedColor ?? null,
-          selectedSize: item.selectedSize ?? null
-        });
-        cartRowIdsToDelete.push(cartEntry.id);
-        continue;
-      }
+      const productId = item.product_id ?? item.id;
+      const cartEntry = await getQuery(
+        `SELECT * FROM cart_items WHERE (id = ? OR product_id = ?) AND user_id = ?`,
+        [item.id, productId, userId]
+      );
+      if (!cartEntry) throw new Error(`Cart item not found or not owned by user: ${productId}`);
 
-      if (item.product_id !== undefined && item.product_id !== null) {
-        const productId = Number(item.product_id);
-        const cartEntry = await getQuery(
-          `SELECT * FROM cart_items WHERE product_id = ? AND user_id = ?`,
-          [productId, userId]
-        );
-        if (!cartEntry) {
-          return res.status(400).json({ error: `Cart item not found or not owned by user: ${productId}` });
-        }
-        const qty = Number(item.quantity ?? cartEntry.quantity ?? 1);
-        const product = await getQuery(`SELECT * FROM products WHERE id = ?`, [productId]);
-        if (!product) return res.status(404).json({ error: `Product not found: ${productId}` });
-        if (product.stock !== null && product.stock !== undefined && Number(product.stock) < qty) {
-          return res.status(400).json({ error: `Insufficient stock for product ${productId}` });
-        }
-        validatedItems.push({ 
-          product_id: productId, 
-          quantity: qty, 
-          cart_id: cartEntry.id,
-          selectedColor: item.selectedColor ?? null,
-          selectedSize: item.selectedSize ?? null
-        });
-        cartRowIdsToDelete.push(cartEntry.id);
-        continue;
-      }
+      const qty = Number(item.quantity ?? cartEntry.quantity ?? 1);
+      const product = await getQuery(`SELECT * FROM products WHERE id = ?`, [productId]);
+      if (!product) throw new Error(`Product not found: ${productId}`);
+      if (product.stock !== null && Number(product.stock) < qty) throw new Error(`Insufficient stock for product ${productId}`);
 
-      return res.status(400).json({ error: "cartItems must include either id (cart row id or product id) or product_id" });
+      validatedItems.push({
+        product_id: productId,
+        quantity: qty,
+        cart_id: cartEntry.id,
+        selectedColor: item.selectedColor ?? null,
+        selectedSize: item.selectedSize ?? null,
+      });
+      cartRowIdsToDelete.push(cartEntry.id);
     }
-
-    await runQuery("BEGIN TRANSACTION");
 
     const orderInsert = await runQuery(
       `INSERT INTO orders 
-        (user_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'))`,
+        (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now','localtime'))`,
       [
         userId,
-        JSON.stringify(shippingAddress || {}),
+        shippingAddrNormalized.id,
+        JSON.stringify(shippingAddrNormalized),
         paymentMethod || "",
         JSON.stringify(paymentDetails || {}),
         totalAmount ?? 0,
@@ -214,7 +202,7 @@ router.post("/place-order", auth, async (req, res) => {
 
       const upd = await runQuery(
         `UPDATE products
-         SET stock = stock - ?, sold = COALESCE(sold, 0) + ?
+         SET stock = stock - ?, sold = COALESCE(sold,0) + ?
          WHERE id = ? AND (stock IS NULL OR stock >= ?)`,
         [v.quantity, v.quantity, v.product_id, v.quantity]
       );
@@ -244,6 +232,7 @@ router.post("/place-order", auth, async (req, res) => {
     return res.status(500).json({ error: "Could not place order", details: err?.message || String(err) });
   }
 });
+
 
 
 /**
@@ -348,6 +337,7 @@ router.get("/stream", (req, res) => {
 });
 
 export default router;
+
 
 
 
