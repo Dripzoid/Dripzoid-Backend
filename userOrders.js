@@ -26,39 +26,86 @@ router.get("/", auth, (req, res) => {
   // Sorting direction
   const sortDir = req.query.sort_dir && req.query.sort_dir.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
-  // Base SQL
+  // Base query for orders (no GROUP_CONCAT)
   let sql = `
-    SELECT o.id, o.status, o.total_amount, o.created_at,
-           GROUP_CONCAT(p.name, ', ') AS products
+    SELECT o.id, o.status, o.total_amount, o.created_at
     FROM orders o
-    JOIN order_items oi ON o.id = oi.order_id
-    JOIN products p ON oi.product_id = p.id
     WHERE o.user_id = ?
   `;
 
-  // Add status filter if provided
   const params = [userId];
+
   if (statusFilter) {
     sql += " AND LOWER(o.status) = ?";
     params.push(statusFilter);
   }
 
-  // Group & sort
-  sql += `
-    GROUP BY o.id
-    ORDER BY ${sortField} ${sortDir}
-    LIMIT ? OFFSET ?
-  `;
+  sql += ` ORDER BY ${sortField} ${sortDir} LIMIT ? OFFSET ?`;
   params.push(limit, offset);
 
-  db.all(sql, params, (err, rows) => {
+  db.all(sql, params, (err, orders) => {
     if (err) {
       console.error("Error fetching orders:", err);
       return res.status(500).json({ message: "Failed to fetch orders" });
     }
-    res.json(rows);
+
+    if (!orders.length) {
+      return res.json([]);
+    }
+
+    // Get all order IDs
+    const orderIds = orders.map((o) => o.id);
+
+    // Fetch items for those orders
+    const itemSql = `
+      SELECT 
+        oi.order_id,
+        oi.quantity,
+        oi.price,
+        p.id AS product_id,
+        p.name,
+        p.image,
+        oi.color,
+        oi.size
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
+    `;
+
+    db.all(itemSql, orderIds, (err2, items) => {
+      if (err2) {
+        console.error("Error fetching order items:", err2);
+        return res.status(500).json({ message: "Failed to fetch order items" });
+      }
+
+      // Group items by order_id
+      const itemsByOrder = {};
+      items.forEach((item) => {
+        if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
+        itemsByOrder[item.order_id].push({
+          id: item.product_id,
+          name: item.name,
+          image: item.image,
+          quantity: item.quantity,
+          price: item.price,
+          options: {
+            color: item.color,
+            size: item.size,
+          },
+        });
+      });
+
+      // Attach items to orders
+      const result = orders.map((order) => ({
+        ...order,
+        items: itemsByOrder[order.id] || [],
+      }));
+
+      res.json(result);
+    });
   });
 });
+
 
 /**
  * PUT /api/user/orders/:id/cancel
@@ -246,6 +293,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
