@@ -64,9 +64,9 @@ router.get("/", auth, (req, res) => {
         oi.price,
         p.id AS product_id,
         p.name,
-        p.image,
-        oi.color,
-        oi.size
+        p.images,
+        oi.selectedColor,
+        oi.selectedSize
       FROM order_items oi
       JOIN products p ON oi.product_id = p.id
       WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
@@ -85,12 +85,12 @@ router.get("/", auth, (req, res) => {
         itemsByOrder[item.order_id].push({
           id: item.product_id,
           name: item.name,
-          image: item.image,
+          image: item.images,
           quantity: item.quantity,
           price: item.price,
           options: {
-            color: item.color,
-            size: item.size,
+            color: item.selectedColor,
+            size: item.selectedSize,
           },
         });
       });
@@ -293,6 +293,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
