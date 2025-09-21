@@ -6,10 +6,6 @@ import PDFDocument from "pdfkit";
 
 const router = express.Router();
 
-/**
- * GET /api/user/orders
- * Fetch all orders for logged-in user (supports pagination, filtering, sorting)
- */
 router.get("/", auth, (req, res) => {
   try {
     const userId = req.user?.id;
@@ -22,15 +18,14 @@ router.get("/", auth, (req, res) => {
     // Filtering
     const statusFilter = req.query.status ? req.query.status.trim().toLowerCase() : null;
 
-    // Sorting (restrict to allowed fields and qualify with table alias to avoid ambiguity)
+    // Sorting
     const allowedSortFields = ["created_at", "status", "total_amount"];
     const sortField = allowedSortFields.includes(req.query.sort_by)
       ? `o.${req.query.sort_by}`
       : "o.created_at";
+    const sortDir = req.query.sort_dir?.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
-    const sortDir = req.query.sort_dir && req.query.sort_dir.toUpperCase() === "ASC" ? "ASC" : "DESC";
-
-    // Build base WHERE and params (re-usable for count and select)
+    // Base WHERE clause
     let baseWhere = "WHERE o.user_id = ?";
     const baseParams = [userId];
     if (statusFilter) {
@@ -38,14 +33,13 @@ router.get("/", auth, (req, res) => {
       baseParams.push(statusFilter);
     }
 
-    // 1) Get total count (distinct o.id) for pagination meta
+    // Count total for pagination
     const countSql = `
       SELECT COUNT(DISTINCT o.id) AS total
       FROM orders o
       LEFT JOIN addresses a ON o.address_id = a.id
       ${baseWhere}
     `;
-
     db.get(countSql, baseParams, (countErr, countRow) => {
       if (countErr) {
         console.error("Error counting orders:", countErr);
@@ -54,23 +48,13 @@ router.get("/", auth, (req, res) => {
 
       const total = Number(countRow?.total ?? 0);
       if (total === 0) {
-        return res.json({
-          data: [],
-          meta: { total: 0, page, pages: 1, limit },
-        });
+        return res.json({ data: [], meta: { total: 0, page, pages: 1, limit } });
       }
 
-      // 2) Fetch paginated order rows (joined with users and addresses)
+      // Fetch paginated orders with users + addresses
       const selectSql = `
         SELECT 
-          o.id,
-          o.user_id,
-          o.status,
-          o.total_amount,
-          o.created_at,
-          o.address_id,
-          o.shipping_address AS shipping_address_raw,
-          o.shipping_json AS shipping_json_raw,
+          o.*,
           u.name AS user_name,
           a.id AS addr_id,
           a.label AS addr_label,
@@ -88,7 +72,6 @@ router.get("/", auth, (req, res) => {
         ORDER BY ${sortField} ${sortDir}
         LIMIT ? OFFSET ?
       `;
-
       const selectParams = [...baseParams, limit, offset];
 
       db.all(selectSql, selectParams, (selErr, orders) => {
@@ -97,28 +80,12 @@ router.get("/", auth, (req, res) => {
           return res.status(500).json({ message: "Failed to fetch orders" });
         }
 
-        if (!orders || orders.length === 0) {
-          // Shouldn't happen because total > 0, but be defensive
-          return res.json({
-            data: [],
-            meta: {
-              total,
-              page,
-              pages: Math.max(1, Math.ceil(total / limit)),
-              limit,
-            },
-          });
-        }
-
-        // Collect order IDs to fetch items (avoid IN () if empty)
-        const orderIds = orders.map((o) => o.id).filter((v) => v != null);
-
-        const itemsByOrder = {}; // will hold arrays keyed by order_id
+        const orderIds = orders.map(o => o.id).filter(v => v != null);
+        const itemsByOrder = {};
 
         const fetchItemsAndRespond = () => {
-          // Build result mapping using itemsByOrder
-          const result = orders.map((orderRow) => {
-            // Prefer canonical address fields (addresses table) if present
+          const result = orders.map(orderRow => {
+            // 1️⃣ Prefer canonical address table
             let shippingAddress = null;
             if (orderRow.addr_id) {
               shippingAddress = {
@@ -133,18 +100,17 @@ router.get("/", auth, (req, res) => {
                 phone: orderRow.addr_phone,
               };
             } else {
-              // fallback: try parse shipping_json_raw (JSON), then shipping_address_raw (JSON or plain text)
-              const rawCandidates = [orderRow.shipping_json_raw, orderRow.shipping_address_raw];
+              // 2️⃣ Fallback to shipping_json_raw or shipping_address_raw
+              const rawCandidates = [orderRow.shipping_json, orderRow.shipping_address];
               for (const raw of rawCandidates) {
                 if (!raw && raw !== "") continue;
-                // if raw is already an object (unlikely from sqlite) accept it
-                if (typeof raw === "object" && raw !== null) {
-                  const parsed = raw;
+                try {
+                  const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
                   if (parsed && typeof parsed === "object") {
                     shippingAddress = {
                       id: parsed.id ?? null,
-                      label: parsed.label ?? parsed.title ?? null,
-                      line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? null,
+                      label: parsed.label ?? parsed.title ?? parsed.name ?? null,
+                      line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? parsed.address ?? null,
                       line2: parsed.line2 ?? parsed.address_line2 ?? parsed.address2 ?? null,
                       city: parsed.city ?? parsed.town ?? null,
                       state: parsed.state ?? null,
@@ -154,49 +120,26 @@ router.get("/", auth, (req, res) => {
                     };
                     break;
                   }
-                }
-
-                if (typeof raw === "string") {
-                  // Try JSON parse first
-                  try {
-                    const parsed = JSON.parse(raw);
-                    if (parsed && typeof parsed === "object") {
-                      shippingAddress = {
-                        id: parsed.id ?? null,
-                        label: parsed.label ?? parsed.title ?? null,
-                        line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? null,
-                        line2: parsed.line2 ?? parsed.address_line2 ?? parsed.address2 ?? null,
-                        city: parsed.city ?? parsed.town ?? null,
-                        state: parsed.state ?? null,
-                        pincode: parsed.pincode ?? parsed.postcode ?? parsed.zip ?? null,
-                        country: parsed.country ?? null,
-                        phone: parsed.phone ?? parsed.mobile ?? null,
-                      };
-                      break;
-                    }
-                  } catch (parseErr) {
-                    // not JSON — use the full string as line1
-                    const trimmed = raw.toString().trim();
-                    if (trimmed) {
-                      shippingAddress = {
-                        id: null,
-                        label: null,
-                        line1: trimmed,
-                        line2: null,
-                        city: null,
-                        state: null,
-                        pincode: null,
-                        country: null,
-                        phone: null,
-                      };
-                      break;
-                    }
+                } catch {
+                  const trimmed = raw.toString().trim();
+                  if (trimmed) {
+                    shippingAddress = {
+                      id: null,
+                      label: null,
+                      line1: trimmed,
+                      line2: null,
+                      city: null,
+                      state: null,
+                      pincode: null,
+                      country: null,
+                      phone: null,
+                    };
+                    break;
                   }
                 }
               }
             }
 
-            // build order object
             return {
               id: orderRow.id,
               user_id: orderRow.user_id,
@@ -206,14 +149,9 @@ router.get("/", auth, (req, res) => {
               created_at: orderRow.created_at,
               shipping_address: shippingAddress,
               items: itemsByOrder[orderRow.id] || [],
-              raw: {
-                shipping_address_raw: orderRow.shipping_address_raw,
-                shipping_json_raw: orderRow.shipping_json_raw,
-              },
             };
           });
 
-          // respond with meta using the accurate total
           res.json({
             data: result,
             meta: {
@@ -223,15 +161,14 @@ router.get("/", auth, (req, res) => {
               limit,
             },
           });
-        }; // end fetchItemsAndRespond
+        };
 
-        // If there are no orderIds (very unlikely after count > 0), skip items query
+        // Fetch items if any orderIds exist
         if (!orderIds || orderIds.length === 0) {
           fetchItemsAndRespond();
           return;
         }
 
-        // 3) Fetch items for all orders (safe placeholders)
         const placeholders = orderIds.map(() => "?").join(",");
         const itemSql = `
           SELECT 
@@ -253,8 +190,7 @@ router.get("/", auth, (req, res) => {
             console.error("Error fetching order items:", itemsErr);
             return res.status(500).json({ message: "Failed to fetch order items" });
           }
-
-          (itemsRows || []).forEach((item) => {
+          (itemsRows || []).forEach(item => {
             if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
             itemsByOrder[item.order_id].push({
               id: item.product_id,
@@ -268,11 +204,10 @@ router.get("/", auth, (req, res) => {
               },
             });
           });
-
           fetchItemsAndRespond();
         });
-      }); // end selectSql callback
-    }); // end countSql callback
+      });
+    });
   } catch (err) {
     console.error("Unexpected error:", err);
     res.status(500).json({ message: "Server error" });
@@ -466,6 +401,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
