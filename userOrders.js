@@ -15,211 +15,269 @@ router.get("/", auth, (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
-    const page = parseInt(req.query.page, 10) || 1;
-    const limit = parseInt(req.query.limit, 10) || 10;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.max(1, parseInt(req.query.limit, 10) || 10);
     const offset = (page - 1) * limit;
 
     // Filtering
     const statusFilter = req.query.status ? req.query.status.trim().toLowerCase() : null;
 
-    // Sorting (only allow specific fields)
+    // Sorting (restrict to allowed fields and qualify with table alias to avoid ambiguity)
     const allowedSortFields = ["created_at", "status", "total_amount"];
-    const sortField = allowedSortFields.includes(req.query.sort_by) ? req.query.sort_by : "created_at";
+    const sortField = allowedSortFields.includes(req.query.sort_by)
+      ? `o.${req.query.sort_by}`
+      : "o.created_at";
 
-    // Sorting direction
     const sortDir = req.query.sort_dir && req.query.sort_dir.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
-    // Base query with LEFT JOIN on addresses and users
-    // Note: orders.address_id references addresses.id (per schema)
-    let sql = `
-      SELECT 
-        o.id,
-        o.user_id,
-        o.status,
-        o.total_amount,
-        o.created_at,
-        o.address_id,
-        o.shipping_address AS shipping_address_raw,
-        o.shipping_json AS shipping_json_raw,
-        u.name AS user_name,
-        a.id AS addr_id,
-        a.label AS addr_label,
-        a.line1 AS addr_line1,
-        a.line2 AS addr_line2,
-        a.city AS addr_city,
-        a.state AS addr_state,
-        a.pincode AS addr_pincode,
-        a.country AS addr_country,
-        a.phone AS addr_phone
-      FROM orders o
-      LEFT JOIN users u ON o.user_id = u.id
-      LEFT JOIN addresses a ON o.address_id = a.id
-      WHERE o.user_id = ?
-    `;
-    const params = [userId];
-
+    // Build base WHERE and params (re-usable for count and select)
+    let baseWhere = "WHERE o.user_id = ?";
+    const baseParams = [userId];
     if (statusFilter) {
-      sql += " AND LOWER(o.status) = ?";
-      params.push(statusFilter);
+      baseWhere += " AND LOWER(o.status) = ?";
+      baseParams.push(statusFilter);
     }
 
-    sql += ` ORDER BY ${sortField} ${sortDir} LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    // 1) Get total count (distinct o.id) for pagination meta
+    const countSql = `
+      SELECT COUNT(DISTINCT o.id) AS total
+      FROM orders o
+      LEFT JOIN addresses a ON o.address_id = a.id
+      ${baseWhere}
+    `;
 
-    db.all(sql, params, (err, orders) => {
-      if (err) {
-        console.error("Error fetching orders:", err);
-        return res.status(500).json({ message: "Failed to fetch orders" });
+    db.get(countSql, baseParams, (countErr, countRow) => {
+      if (countErr) {
+        console.error("Error counting orders:", countErr);
+        return res.status(500).json({ message: "Failed to fetch orders count" });
       }
 
-      if (!orders || orders.length === 0) {
+      const total = Number(countRow?.total ?? 0);
+      if (total === 0) {
         return res.json({
           data: [],
           meta: { total: 0, page, pages: 1, limit },
         });
       }
 
-      // Get all order IDs to fetch items
-      const orderIds = orders.map((o) => o.id).filter((v, i, a) => v != null);
-
-      // Fetch items for these orders
-      const placeholders = orderIds.map(() => "?").join(",");
-      const itemSql = `
+      // 2) Fetch paginated order rows (joined with users and addresses)
+      const selectSql = `
         SELECT 
-          oi.order_id,
-          oi.quantity,
-          oi.price,
-          p.id AS product_id,
-          p.name,
-          p.images,
-          oi.selectedColor,
-          oi.selectedSize
-        FROM order_items oi
-        JOIN products p ON oi.product_id = p.id
-        WHERE oi.order_id IN (${placeholders})
+          o.id,
+          o.user_id,
+          o.status,
+          o.total_amount,
+          o.created_at,
+          o.address_id,
+          o.shipping_address AS shipping_address_raw,
+          o.shipping_json AS shipping_json_raw,
+          u.name AS user_name,
+          a.id AS addr_id,
+          a.label AS addr_label,
+          a.line1 AS addr_line1,
+          a.line2 AS addr_line2,
+          a.city AS addr_city,
+          a.state AS addr_state,
+          a.pincode AS addr_pincode,
+          a.country AS addr_country,
+          a.phone AS addr_phone
+        FROM orders o
+        LEFT JOIN users u ON o.user_id = u.id
+        LEFT JOIN addresses a ON o.address_id = a.id
+        ${baseWhere}
+        ORDER BY ${sortField} ${sortDir}
+        LIMIT ? OFFSET ?
       `;
 
-      db.all(itemSql, orderIds, (err2, items) => {
-        if (err2) {
-          console.error("Error fetching order items:", err2);
-          return res.status(500).json({ message: "Failed to fetch order items" });
+      const selectParams = [...baseParams, limit, offset];
+
+      db.all(selectSql, selectParams, (selErr, orders) => {
+        if (selErr) {
+          console.error("Error fetching orders:", selErr);
+          return res.status(500).json({ message: "Failed to fetch orders" });
         }
 
-        // Group items by order_id
-        const itemsByOrder = {};
-        (items || []).forEach((item) => {
-          if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
-          itemsByOrder[item.order_id].push({
-            id: item.product_id,
-            name: item.name,
-            image: item.images,
-            quantity: item.quantity,
-            price: item.price,
-            options: {
-              color: item.selectedColor,
-              size: item.selectedSize,
+        if (!orders || orders.length === 0) {
+          // Shouldn't happen because total > 0, but be defensive
+          return res.json({
+            data: [],
+            meta: {
+              total,
+              page,
+              pages: Math.max(1, Math.ceil(total / limit)),
+              limit,
             },
           });
-        });
+        }
 
-        // Build result array with shipping address & user name
-        const result = orders.map((orderRow) => {
-          // Prefer canonical address row (addresses table) if present
-          let shippingAddress = null;
-          if (orderRow.addr_id) {
-            shippingAddress = {
-              id: orderRow.addr_id,
-              label: orderRow.addr_label,
-              line1: orderRow.addr_line1,
-              line2: orderRow.addr_line2,
-              city: orderRow.addr_city,
-              state: orderRow.addr_state,
-              pincode: orderRow.addr_pincode,
-              country: orderRow.addr_country,
-              phone: orderRow.addr_phone,
-            };
-          } else {
-            // Fallback: try parse shipping_json_raw or shipping_address_raw (if it contains JSON)
-            const rawJsonCandidates = [orderRow.shipping_json_raw, orderRow.shipping_address_raw];
-            for (const raw of rawJsonCandidates) {
-              if (!raw) continue;
-              try {
-                const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-                // Expect parsed to be an object with fields similar to address
-                if (parsed && typeof parsed === "object") {
-                  shippingAddress = {
-                    id: parsed.id ?? null,
-                    label: parsed.label ?? parsed.title ?? null,
-                    line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? null,
-                    line2: parsed.line2 ?? parsed.address_line2 ?? parsed.address2 ?? null,
-                    city: parsed.city ?? parsed.town ?? null,
-                    state: parsed.state ?? null,
-                    pincode: parsed.pincode ?? parsed.postcode ?? parsed.zip ?? null,
-                    country: parsed.country ?? null,
-                    phone: parsed.phone ?? parsed.mobile ?? null,
-                  };
-                  break;
+        // Collect order IDs to fetch items (avoid IN () if empty)
+        const orderIds = orders.map((o) => o.id).filter((v) => v != null);
+
+        const itemsByOrder = {}; // will hold arrays keyed by order_id
+
+        const fetchItemsAndRespond = () => {
+          // Build result mapping using itemsByOrder
+          const result = orders.map((orderRow) => {
+            // Prefer canonical address fields (addresses table) if present
+            let shippingAddress = null;
+            if (orderRow.addr_id) {
+              shippingAddress = {
+                id: orderRow.addr_id,
+                label: orderRow.addr_label,
+                line1: orderRow.addr_line1,
+                line2: orderRow.addr_line2,
+                city: orderRow.addr_city,
+                state: orderRow.addr_state,
+                pincode: orderRow.addr_pincode,
+                country: orderRow.addr_country,
+                phone: orderRow.addr_phone,
+              };
+            } else {
+              // fallback: try parse shipping_json_raw (JSON), then shipping_address_raw (JSON or plain text)
+              const rawCandidates = [orderRow.shipping_json_raw, orderRow.shipping_address_raw];
+              for (const raw of rawCandidates) {
+                if (!raw && raw !== "") continue;
+                // if raw is already an object (unlikely from sqlite) accept it
+                if (typeof raw === "object" && raw !== null) {
+                  const parsed = raw;
+                  if (parsed && typeof parsed === "object") {
+                    shippingAddress = {
+                      id: parsed.id ?? null,
+                      label: parsed.label ?? parsed.title ?? null,
+                      line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? null,
+                      line2: parsed.line2 ?? parsed.address_line2 ?? parsed.address2 ?? null,
+                      city: parsed.city ?? parsed.town ?? null,
+                      state: parsed.state ?? null,
+                      pincode: parsed.pincode ?? parsed.postcode ?? parsed.zip ?? null,
+                      country: parsed.country ?? null,
+                      phone: parsed.phone ?? parsed.mobile ?? null,
+                    };
+                    break;
+                  }
                 }
-              } catch (parseErr) {
-                // not JSON -> could be a plain text address string: use as line1
-                const trimmed = (raw || "").toString().trim();
-                if (trimmed) {
-                  shippingAddress = {
-                    id: null,
-                    label: null,
-                    line1: trimmed,
-                    line2: null,
-                    city: null,
-                    state: null,
-                    pincode: null,
-                    country: null,
-                    phone: null,
-                  };
-                  break;
+
+                if (typeof raw === "string") {
+                  // Try JSON parse first
+                  try {
+                    const parsed = JSON.parse(raw);
+                    if (parsed && typeof parsed === "object") {
+                      shippingAddress = {
+                        id: parsed.id ?? null,
+                        label: parsed.label ?? parsed.title ?? null,
+                        line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? null,
+                        line2: parsed.line2 ?? parsed.address_line2 ?? parsed.address2 ?? null,
+                        city: parsed.city ?? parsed.town ?? null,
+                        state: parsed.state ?? null,
+                        pincode: parsed.pincode ?? parsed.postcode ?? parsed.zip ?? null,
+                        country: parsed.country ?? null,
+                        phone: parsed.phone ?? parsed.mobile ?? null,
+                      };
+                      break;
+                    }
+                  } catch (parseErr) {
+                    // not JSON — use the full string as line1
+                    const trimmed = raw.toString().trim();
+                    if (trimmed) {
+                      shippingAddress = {
+                        id: null,
+                        label: null,
+                        line1: trimmed,
+                        line2: null,
+                        city: null,
+                        state: null,
+                        pincode: null,
+                        country: null,
+                        phone: null,
+                      };
+                      break;
+                    }
+                  }
                 }
               }
             }
-          }
 
-          // final safety: if still null, set basic placeholder
-          if (!shippingAddress) {
-            shippingAddress = null;
-          }
+            // build order object
+            return {
+              id: orderRow.id,
+              user_id: orderRow.user_id,
+              user_name: orderRow.user_name ?? null,
+              status: orderRow.status,
+              total_amount: orderRow.total_amount,
+              created_at: orderRow.created_at,
+              shipping_address: shippingAddress,
+              items: itemsByOrder[orderRow.id] || [],
+              raw: {
+                shipping_address_raw: orderRow.shipping_address_raw,
+                shipping_json_raw: orderRow.shipping_json_raw,
+              },
+            };
+          });
 
-          return {
-            id: orderRow.id,
-            user_id: orderRow.user_id,
-            user_name: orderRow.user_name ?? null,
-            status: orderRow.status,
-            total_amount: orderRow.total_amount,
-            created_at: orderRow.created_at,
-            shipping_address: shippingAddress,
-            items: itemsByOrder[orderRow.id] || [],
-            raw: {
-              shipping_address_raw: orderRow.shipping_address_raw,
-              shipping_json_raw: orderRow.shipping_json_raw,
+          // respond with meta using the accurate total
+          res.json({
+            data: result,
+            meta: {
+              total,
+              page,
+              pages: Math.max(1, Math.ceil(total / limit)),
+              limit,
             },
-          };
-        });
+          });
+        }; // end fetchItemsAndRespond
 
-        // Send response with meta (note: for accurate total across DB you may want a separate COUNT query)
-        res.json({
-          data: result,
-          meta: {
-            total: result.length,
-            page,
-            pages: Math.max(1, Math.ceil(result.length / limit)),
-            limit,
-          },
+        // If there are no orderIds (very unlikely after count > 0), skip items query
+        if (!orderIds || orderIds.length === 0) {
+          fetchItemsAndRespond();
+          return;
+        }
+
+        // 3) Fetch items for all orders (safe placeholders)
+        const placeholders = orderIds.map(() => "?").join(",");
+        const itemSql = `
+          SELECT 
+            oi.order_id,
+            oi.quantity,
+            oi.price,
+            p.id AS product_id,
+            p.name,
+            p.images,
+            oi.selectedColor,
+            oi.selectedSize
+          FROM order_items oi
+          JOIN products p ON oi.product_id = p.id
+          WHERE oi.order_id IN (${placeholders})
+        `;
+
+        db.all(itemSql, orderIds, (itemsErr, itemsRows) => {
+          if (itemsErr) {
+            console.error("Error fetching order items:", itemsErr);
+            return res.status(500).json({ message: "Failed to fetch order items" });
+          }
+
+          (itemsRows || []).forEach((item) => {
+            if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
+            itemsByOrder[item.order_id].push({
+              id: item.product_id,
+              name: item.name,
+              image: item.images,
+              quantity: item.quantity,
+              price: item.price,
+              options: {
+                color: item.selectedColor,
+                size: item.selectedSize,
+              },
+            });
+          });
+
+          fetchItemsAndRespond();
         });
-      });
-    });
+      }); // end selectSql callback
+    }); // end countSql callback
   } catch (err) {
     console.error("Unexpected error:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
-
 
 
 /**
@@ -408,6 +466,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
