@@ -11,99 +11,113 @@ const router = express.Router();
  * Fetch all orders for logged-in user (supports pagination, filtering, sorting)
  */
 router.get("/", auth, (req, res) => {
-  const userId = req.user.id;
-  const page = parseInt(req.query.page, 10) || 1;
-  const limit = parseInt(req.query.limit, 10) || 10;
-  const offset = (page - 1) * limit;
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
-  // Filtering
-  const statusFilter = req.query.status ? req.query.status.trim().toLowerCase() : null;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const offset = (page - 1) * limit;
 
-  // Sorting (only allow specific fields)
-  const allowedSortFields = ["created_at", "status", "total_amount"];
-  const sortField = allowedSortFields.includes(req.query.sort_by) ? req.query.sort_by : "created_at";
+    // Filtering
+    const statusFilter = req.query.status ? req.query.status.trim().toLowerCase() : null;
 
-  // Sorting direction
-  const sortDir = req.query.sort_dir && req.query.sort_dir.toUpperCase() === "ASC" ? "ASC" : "DESC";
+    // Sorting (only allow specific fields)
+    const allowedSortFields = ["created_at", "status", "total_amount"];
+    const sortField = allowedSortFields.includes(req.query.sort_by) ? req.query.sort_by : "created_at";
 
-  // Base query for orders (no GROUP_CONCAT)
-  let sql = `
-    SELECT o.id, o.status, o.total_amount, o.created_at
-    FROM orders o
-    WHERE o.user_id = ?
-  `;
+    // Sorting direction
+    const sortDir = req.query.sort_dir && req.query.sort_dir.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
-  const params = [userId];
-
-  if (statusFilter) {
-    sql += " AND LOWER(o.status) = ?";
-    params.push(statusFilter);
-  }
-
-  sql += ` ORDER BY ${sortField} ${sortDir} LIMIT ? OFFSET ?`;
-  params.push(limit, offset);
-
-  db.all(sql, params, (err, orders) => {
-    if (err) {
-      console.error("Error fetching orders:", err);
-      return res.status(500).json({ message: "Failed to fetch orders" });
-    }
-
-    if (!orders.length) {
-      return res.json([]);
-    }
-
-    // Get all order IDs
-    const orderIds = orders.map((o) => o.id);
-
-    // Fetch items for those orders
-    const itemSql = `
-      SELECT 
-        oi.order_id,
-        oi.quantity,
-        oi.price,
-        p.id AS product_id,
-        p.name,
-        p.images,
-        oi.selectedColor,
-        oi.selectedSize
-      FROM order_items oi
-      JOIN products p ON oi.product_id = p.id
-      WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
+    // Base query
+    let sql = `
+      SELECT o.id, o.status, o.total_amount, o.created_at
+      FROM orders o
+      WHERE o.user_id = ?
     `;
+    const params = [userId];
 
-    db.all(itemSql, orderIds, (err2, items) => {
-      if (err2) {
-        console.error("Error fetching order items:", err2);
-        return res.status(500).json({ message: "Failed to fetch order items" });
+    if (statusFilter) {
+      sql += " AND LOWER(o.status) = ?";
+      params.push(statusFilter);
+    }
+
+    sql += ` ORDER BY ${sortField} ${sortDir} LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+
+    db.all(sql, params, (err, orders) => {
+      if (err) {
+        console.error("Error fetching orders:", err);
+        return res.status(500).json({ message: "Failed to fetch orders" });
       }
 
-      // Group items by order_id
-      const itemsByOrder = {};
-      items.forEach((item) => {
-        if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
-        itemsByOrder[item.order_id].push({
-          id: item.product_id,
-          name: item.name,
-          image: item.images,
-          quantity: item.quantity,
-          price: item.price,
-          options: {
-            color: item.selectedColor,
-            size: item.selectedSize,
+      if (!orders.length) return res.json({ data: [], meta: { total: 0, page, pages: 1, limit } });
+
+      // Get all order IDs
+      const orderIds = orders.map((o) => o.id);
+
+      // Fetch items
+      const placeholders = orderIds.map(() => "?").join(",");
+      const itemSql = `
+        SELECT 
+          oi.order_id,
+          oi.quantity,
+          oi.price,
+          p.id AS product_id,
+          p.name,
+          p.images,
+          oi.selectedColor,
+          oi.selectedSize
+        FROM order_items oi
+        JOIN products p ON oi.product_id = p.id
+        WHERE oi.order_id IN (${placeholders})
+      `;
+
+      db.all(itemSql, orderIds, (err2, items) => {
+        if (err2) {
+          console.error("Error fetching order items:", err2);
+          return res.status(500).json({ message: "Failed to fetch order items" });
+        }
+
+        // Group items by order_id
+        const itemsByOrder = {};
+        items.forEach((item) => {
+          if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
+          itemsByOrder[item.order_id].push({
+            id: item.product_id,
+            name: item.name,
+            image: item.images,
+            quantity: item.quantity,
+            price: item.price,
+            options: {
+              color: item.selectedColor,
+              size: item.selectedSize,
+            },
+          });
+        });
+
+        // Attach items to orders
+        const result = orders.map((order) => ({
+          ...order,
+          items: itemsByOrder[order.id] || [],
+        }));
+
+        // Send response with meta
+        res.json({
+          data: result,
+          meta: {
+            total: result.length,
+            page,
+            pages: Math.max(1, Math.ceil(result.length / limit)),
+            limit,
           },
         });
       });
-
-      // Attach items to orders
-      const result = orders.map((order) => ({
-        ...order,
-        items: itemsByOrder[order.id] || [],
-      }));
-
-      res.json(result);
     });
-  });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 
@@ -293,6 +307,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
