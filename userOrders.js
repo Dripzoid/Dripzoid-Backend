@@ -29,23 +29,31 @@ router.get("/", auth, (req, res) => {
     // Sorting direction
     const sortDir = req.query.sort_dir && req.query.sort_dir.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
-    // Base query with LEFT JOIN on addresses
+    // Base query with LEFT JOIN on addresses and users
+    // Note: orders.address_id references addresses.id (per schema)
     let sql = `
       SELECT 
         o.id,
+        o.user_id,
         o.status,
         o.total_amount,
         o.created_at,
-        a.id AS address_id,
-        a.full_name,
-        a.phone,
-        a.street,
-        a.city,
-        a.state,
-        a.zip,
-        a.country
+        o.address_id,
+        o.shipping_address AS shipping_address_raw,
+        o.shipping_json AS shipping_json_raw,
+        u.name AS user_name,
+        a.id AS addr_id,
+        a.label AS addr_label,
+        a.line1 AS addr_line1,
+        a.line2 AS addr_line2,
+        a.city AS addr_city,
+        a.state AS addr_state,
+        a.pincode AS addr_pincode,
+        a.country AS addr_country,
+        a.phone AS addr_phone
       FROM orders o
-      LEFT JOIN addresses a ON o.id = a.order_id
+      LEFT JOIN users u ON o.user_id = u.id
+      LEFT JOIN addresses a ON o.address_id = a.id
       WHERE o.user_id = ?
     `;
     const params = [userId];
@@ -64,17 +72,17 @@ router.get("/", auth, (req, res) => {
         return res.status(500).json({ message: "Failed to fetch orders" });
       }
 
-      if (!orders.length) {
+      if (!orders || orders.length === 0) {
         return res.json({
           data: [],
           meta: { total: 0, page, pages: 1, limit },
         });
       }
 
-      // Get all order IDs
-      const orderIds = orders.map((o) => o.id);
+      // Get all order IDs to fetch items
+      const orderIds = orders.map((o) => o.id).filter((v, i, a) => v != null);
 
-      // Fetch items
+      // Fetch items for these orders
       const placeholders = orderIds.map(() => "?").join(",");
       const itemSql = `
         SELECT 
@@ -99,7 +107,7 @@ router.get("/", auth, (req, res) => {
 
         // Group items by order_id
         const itemsByOrder = {};
-        items.forEach((item) => {
+        (items || []).forEach((item) => {
           if (!itemsByOrder[item.order_id]) itemsByOrder[item.order_id] = [];
           itemsByOrder[item.order_id].push({
             id: item.product_id,
@@ -114,28 +122,87 @@ router.get("/", auth, (req, res) => {
           });
         });
 
-        // Attach items + address to orders
-        const result = orders.map((order) => ({
-          id: order.id,
-          status: order.status,
-          total_amount: order.total_amount,
-          created_at: order.created_at,
-          address: order.address_id
-            ? {
-                id: order.address_id,
-                full_name: order.full_name,
-                phone: order.phone,
-                street: order.street,
-                city: order.city,
-                state: order.state,
-                zip: order.zip,
-                country: order.country,
+        // Build result array with shipping address & user name
+        const result = orders.map((orderRow) => {
+          // Prefer canonical address row (addresses table) if present
+          let shippingAddress = null;
+          if (orderRow.addr_id) {
+            shippingAddress = {
+              id: orderRow.addr_id,
+              label: orderRow.addr_label,
+              line1: orderRow.addr_line1,
+              line2: orderRow.addr_line2,
+              city: orderRow.addr_city,
+              state: orderRow.addr_state,
+              pincode: orderRow.addr_pincode,
+              country: orderRow.addr_country,
+              phone: orderRow.addr_phone,
+            };
+          } else {
+            // Fallback: try parse shipping_json_raw or shipping_address_raw (if it contains JSON)
+            const rawJsonCandidates = [orderRow.shipping_json_raw, orderRow.shipping_address_raw];
+            for (const raw of rawJsonCandidates) {
+              if (!raw) continue;
+              try {
+                const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+                // Expect parsed to be an object with fields similar to address
+                if (parsed && typeof parsed === "object") {
+                  shippingAddress = {
+                    id: parsed.id ?? null,
+                    label: parsed.label ?? parsed.title ?? null,
+                    line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? null,
+                    line2: parsed.line2 ?? parsed.address_line2 ?? parsed.address2 ?? null,
+                    city: parsed.city ?? parsed.town ?? null,
+                    state: parsed.state ?? null,
+                    pincode: parsed.pincode ?? parsed.postcode ?? parsed.zip ?? null,
+                    country: parsed.country ?? null,
+                    phone: parsed.phone ?? parsed.mobile ?? null,
+                  };
+                  break;
+                }
+              } catch (parseErr) {
+                // not JSON -> could be a plain text address string: use as line1
+                const trimmed = (raw || "").toString().trim();
+                if (trimmed) {
+                  shippingAddress = {
+                    id: null,
+                    label: null,
+                    line1: trimmed,
+                    line2: null,
+                    city: null,
+                    state: null,
+                    pincode: null,
+                    country: null,
+                    phone: null,
+                  };
+                  break;
+                }
               }
-            : null,
-          items: itemsByOrder[order.id] || [],
-        }));
+            }
+          }
 
-        // Send response with meta
+          // final safety: if still null, set basic placeholder
+          if (!shippingAddress) {
+            shippingAddress = null;
+          }
+
+          return {
+            id: orderRow.id,
+            user_id: orderRow.user_id,
+            user_name: orderRow.user_name ?? null,
+            status: orderRow.status,
+            total_amount: orderRow.total_amount,
+            created_at: orderRow.created_at,
+            shipping_address: shippingAddress,
+            items: itemsByOrder[orderRow.id] || [],
+            raw: {
+              shipping_address_raw: orderRow.shipping_address_raw,
+              shipping_json_raw: orderRow.shipping_json_raw,
+            },
+          };
+        });
+
+        // Send response with meta (note: for accurate total across DB you may want a separate COUNT query)
         res.json({
           data: result,
           meta: {
@@ -341,6 +408,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
