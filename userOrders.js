@@ -29,10 +29,23 @@ router.get("/", auth, (req, res) => {
     // Sorting direction
     const sortDir = req.query.sort_dir && req.query.sort_dir.toUpperCase() === "ASC" ? "ASC" : "DESC";
 
-    // Base query
+    // Base query with LEFT JOIN on addresses
     let sql = `
-      SELECT o.id, o.status, o.total_amount, o.created_at
+      SELECT 
+        o.id,
+        o.status,
+        o.total_amount,
+        o.created_at,
+        a.id AS address_id,
+        a.full_name,
+        a.phone,
+        a.street,
+        a.city,
+        a.state,
+        a.zip,
+        a.country
       FROM orders o
+      LEFT JOIN addresses a ON o.id = a.order_id
       WHERE o.user_id = ?
     `;
     const params = [userId];
@@ -51,7 +64,12 @@ router.get("/", auth, (req, res) => {
         return res.status(500).json({ message: "Failed to fetch orders" });
       }
 
-      if (!orders.length) return res.json({ data: [], meta: { total: 0, page, pages: 1, limit } });
+      if (!orders.length) {
+        return res.json({
+          data: [],
+          meta: { total: 0, page, pages: 1, limit },
+        });
+      }
 
       // Get all order IDs
       const orderIds = orders.map((o) => o.id);
@@ -96,9 +114,24 @@ router.get("/", auth, (req, res) => {
           });
         });
 
-        // Attach items to orders
+        // Attach items + address to orders
         const result = orders.map((order) => ({
-          ...order,
+          id: order.id,
+          status: order.status,
+          total_amount: order.total_amount,
+          created_at: order.created_at,
+          address: order.address_id
+            ? {
+                id: order.address_id,
+                full_name: order.full_name,
+                phone: order.phone,
+                street: order.street,
+                city: order.city,
+                state: order.state,
+                zip: order.zip,
+                country: order.country,
+              }
+            : null,
           items: itemsByOrder[order.id] || [],
         }));
 
@@ -119,6 +152,7 @@ router.get("/", auth, (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
 
 
 /**
@@ -307,6 +341,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
