@@ -652,26 +652,33 @@ app.get("/api/auth/me", authenticateToken, (req, res) => {
 });
 
 // -------------------- Data Export --------------------
-app.get("/api/admin/data-export", auth, (req, res) => {
+router.get("/api/admin/data-export", auth, (req, res) => {
   try {
-    const filePath = DB_PATH;
-
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(DB_PATH)) {
       return res.status(404).json({ message: "Database file not found" });
     }
 
+    // Generate a filename with today's date
     const fileName = `dripzoid-backup-${new Date().toISOString().split("T")[0]}.db`;
 
+    // Set headers to trigger download
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
     res.setHeader("Content-Type", "application/octet-stream");
 
-    const fileStream = fs.createReadStream(filePath);
+    // Stream the file to the client
+    const fileStream = fs.createReadStream(DB_PATH);
     fileStream.pipe(res);
+
+    fileStream.on("error", (err) => {
+      console.error("File streaming error:", err);
+      res.status(500).end();
+    });
   } catch (err) {
     console.error("Data export error:", err);
     res.status(500).json({ message: "Failed to export database" });
   }
 });
+
 
 // -------------------- Mount Other Routes --------------------
 app.use("/api/wishlist", wishlistRoutes);
@@ -725,6 +732,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
