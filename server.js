@@ -493,7 +493,7 @@ app.get(
 /**
  * Get all users (admin only ideally)
  */
-app.get("/", async (req, res) => {
+app.get("/users", async (req, res) => {
   try {
     const rows = await runQuery(
       `SELECT id, name, email, phone, is_admin, created_at, gender, dob FROM users`
@@ -508,7 +508,7 @@ app.get("/", async (req, res) => {
 /**
  * Get single user by ID
  */
-app.get("/:id", async (req, res) => {
+app.get("/users/:id", async (req, res) => {
   try {
     const rows = await runQuery(
       `SELECT id, name, email, phone, is_admin, created_at, gender, dob FROM users WHERE id = ?`,
@@ -524,7 +524,7 @@ app.get("/:id", async (req, res) => {
 /**
  * Update user (role, status, etc.)
  */
-app.put("/:id", async (req, res) => {
+app.put("/users/:id", async (req, res) => {
   try {
     const { name, phone, gender, dob, is_admin } = req.body;
 
@@ -542,7 +542,7 @@ app.put("/:id", async (req, res) => {
 /**
  * Delete user
  */
-app.delete("/:id", async (req, res) => {
+app.delete("/users/:id", async (req, res) => {
   try {
     await runExecute(`DELETE FROM users WHERE id = ?`, [req.params.id]);
     res.json({ message: "User deleted" });
@@ -793,6 +793,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
