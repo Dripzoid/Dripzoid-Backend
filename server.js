@@ -490,6 +490,67 @@ app.get(
   }
 );
 
+/**
+ * Get all users (admin only ideally)
+ */
+router.get("/", async (req, res) => {
+  try {
+    const rows = await runQuery(
+      `SELECT id, name, email, phone, is_admin, created_at, gender, dob FROM users`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Fetch users error:", err);
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+});
+
+/**
+ * Get single user by ID
+ */
+router.get("/:id", async (req, res) => {
+  try {
+    const rows = await runQuery(
+      `SELECT id, name, email, phone, is_admin, created_at, gender, dob FROM users WHERE id = ?`,
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: "User not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+/**
+ * Update user (role, status, etc.)
+ */
+router.put("/:id", async (req, res) => {
+  try {
+    const { name, phone, gender, dob, is_admin } = req.body;
+
+    await runExecute(
+      `UPDATE users SET name = ?, phone = ?, gender = ?, dob = ?, is_admin = ? WHERE id = ?`,
+      [name, phone, gender, dob, is_admin, req.params.id]
+    );
+
+    res.json({ message: "User updated" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update user" });
+  }
+});
+
+/**
+ * Delete user
+ */
+router.delete("/:id", async (req, res) => {
+  try {
+    await runExecute(`DELETE FROM users WHERE id = ?`, [req.params.id]);
+    res.json({ message: "User deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
 // -------------------- Signout and session management --------------------
 
 // Changed route: /api/signout-session (was /api/logout)
@@ -732,6 +793,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
