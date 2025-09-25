@@ -199,7 +199,7 @@ router.get("/", authenticateToken, (req, res) => {
 });
 
 // -------------------- Get cart items for a specific user --------------------
-router.get("/api/cart/:id", authenticateToken, (req, res) => {
+router.get("/:id", authenticateToken, (req, res) => {
   try {
     const requestedUserId = Number(req.params.id);
     const loggedInUserId = Number(req.user?.id);
@@ -287,4 +287,5 @@ router.delete("/:id", authenticateToken, (req, res) => {
 });
 
 export default router;
+
 
