@@ -198,6 +198,38 @@ router.get("/", authenticateToken, (req, res) => {
   });
 });
 
+// -------------------- Get cart items for a specific user --------------------
+router.get("/api/cart/:id", authenticateToken, (req, res) => {
+  try {
+    const requestedUserId = Number(req.params.id);
+    const loggedInUserId = Number(req.user?.id);
+
+    if (!requestedUserId) return res.status(400).json({ message: "Invalid user ID" });
+
+    // Optional: Only allow users to fetch their own cart (or admin override if needed)
+    if (requestedUserId !== loggedInUserId) {
+      return res.status(403).json({ message: "Forbidden: Cannot access another user's cart" });
+    }
+
+    db.all(
+      "SELECT c.id, c.product_id, c.quantity, p.name AS product_name, p.price FROM cart c LEFT JOIN products p ON c.product_id = p.id WHERE c.user_id = ?",
+      [requestedUserId],
+      (err, rows) => {
+        if (err) {
+          console.error("Fetch cart items error:", err);
+          return res.status(500).json({ message: "Failed to fetch cart items" });
+        }
+
+        res.json({ cartItems: rows || [] });
+      }
+    );
+  } catch (err) {
+    console.error("GET /api/cart/:id error:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+
 /**
  * POST /api/cart
  * Adds an item to the cart — validates product exists first
@@ -255,3 +287,4 @@ router.delete("/:id", authenticateToken, (req, res) => {
 });
 
 export default router;
+
