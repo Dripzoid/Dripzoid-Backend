@@ -408,6 +408,21 @@ router.get("/:id", authMiddleware, async (req, res) => {
   }
 });
 
+router.get("/user/:userId", authMiddleware, async (req, res) => {
+  const { userId } = req.params;
+  const sql = `
+    SELECT o.*, COUNT(oi.id) as items_count
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE o.user_id = ?
+    GROUP BY o.id
+    ORDER BY o.created_at DESC
+  `;
+  const rows = await dbAll(sql, [userId]);
+  res.json(rows);
+});
+
+
 
 // PUT /api/admin/orders/bulk-update
 router.put("/bulk-update", authMiddleware, async (req, res) => {
@@ -454,6 +469,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 export default router;
+
 
 
 
