@@ -212,7 +212,7 @@ router.get("/:id", authenticateToken, (req, res) => {
     }
 
     db.all(
-      "SELECT c.id, c.product_id, c.quantity, p.name AS product_name, p.price FROM cart c LEFT JOIN products p ON c.product_id = p.id WHERE c.user_id = ?",
+      "SELECT c.id, c.product_id, c.quantity, p.name AS product_name, p.price FROM cart_items c LEFT JOIN products p ON c.product_id = p.id WHERE c.user_id = ?",
       [requestedUserId],
       (err, rows) => {
         if (err) {
@@ -287,5 +287,6 @@ router.delete("/:id", authenticateToken, (req, res) => {
 });
 
 export default router;
+
 
 
