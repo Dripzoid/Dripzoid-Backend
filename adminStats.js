@@ -18,9 +18,7 @@ const fmtDate = (d) => {
   return `${yyyy}-${mm}-${dd}`;
 };
 
-// Returns [startISO, endISO] or null on invalid
 const rangeFromDate = (dateStr) => {
-  // expect YYYY-MM-DD
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
   try {
     const start = new Date(Date.UTC(
@@ -36,14 +34,12 @@ const rangeFromDate = (dateStr) => {
   }
 };
 
-// monthStr: YYYY-MM -> returns start = YYYY-MM-01 00:00:00, end = first day of next month
 const rangeFromMonth = (monthStr) => {
   if (!/^\d{4}-\d{2}$/.test(monthStr)) return null;
   try {
     const yyyy = Number(monthStr.slice(0, 4));
     const mm = Number(monthStr.slice(5, 7));
     const start = new Date(Date.UTC(yyyy, mm - 1, 1, 0, 0, 0));
-    // next month
     const end = new Date(Date.UTC(yyyy, mm, 1, 0, 0, 0));
     return [`${fmtDate(start)} 00:00:00`, `${fmtDate(end)} 00:00:00`];
   } catch (e) {
@@ -51,31 +47,22 @@ const rangeFromMonth = (monthStr) => {
   }
 };
 
-/**
- * Compute ISO week start (Monday) for given ISO week and year
- * ISO week strings typically 'YYYY-Www' or 'YYYY-Ww'
- */
 const isoWeekStart = (year, week) => {
-  // Based on algorithm using Jan 4th
   const jan4 = new Date(Date.UTC(year, 0, 4));
-  // getUTCDay: 0 (Sun) .. 6 (Sat) -> convert to 1..7 where Monday=1
   const dayOfWeek = jan4.getUTCDay() === 0 ? 7 : jan4.getUTCDay();
-  // Monday of week 1:
   const mondayOfWeek1 = new Date(jan4.getTime() - (dayOfWeek - 1) * 24 * 3600 * 1000);
-  // start of requested week:
   const start = new Date(mondayOfWeek1.getTime() + (week - 1) * 7 * 24 * 3600 * 1000);
   return start;
 };
 
 const rangeFromWeek = (weekStr) => {
-  // accept formats like '2025-W09', '2025-W9' or '2025-09' (some frontends might send W-less week)
   const m = /^(\d{4})-W?(\d{1,2})$/i.exec(weekStr);
   if (!m) return null;
   const yyyy = Number(m[1]);
   const ww = Number(m[2]);
   if (!Number.isFinite(yyyy) || !Number.isFinite(ww) || ww < 1 || ww > 53) return null;
   try {
-    const start = isoWeekStart(yyyy, ww); // Monday start
+    const start = isoWeekStart(yyyy, ww);
     const end = new Date(start.getTime() + 7 * 24 * 3600 * 1000);
     return [`${fmtDate(start)} 00:00:00`, `${fmtDate(end)} 00:00:00`];
   } catch (e) {
@@ -85,18 +72,11 @@ const rangeFromWeek = (weekStr) => {
 
 /**
  * GET /api/admin/stats
- * Query params:
- *  - date=YYYY-MM-DD         (day wise)
- *  - week=YYYY-Www or YYYY-Ww (ISO week)
- *  - month=YYYY-MM           (monthly)
- *
- * If none provided -> overall stats
  */
 router.get("/stats", authMiddleware, (req, res) => {
   try {
     const { date: dateParam, week: weekParam, month: monthParam } = req.query;
 
-    // Determine date range (start inclusive, end exclusive)
     let range = null;
     if (dateParam) {
       range = rangeFromDate(String(dateParam));
@@ -106,7 +86,6 @@ router.get("/stats", authMiddleware, (req, res) => {
       range = rangeFromMonth(String(monthParam));
     }
 
-    // Build WHERE clause & params for orders table (created_at) when range provided
     let whereClause = "";
     let whereParams = [];
     if (Array.isArray(range) && range.length === 2) {
@@ -114,7 +93,6 @@ router.get("/stats", authMiddleware, (req, res) => {
       whereParams = [range[0], range[1]];
     }
 
-    // Orders stats (apply date filter if provided)
     const ordersSql = `
       SELECT
         COUNT(*) AS totalOrders,
@@ -128,8 +106,6 @@ router.get("/stats", authMiddleware, (req, res) => {
       ${whereClause};
     `;
 
-    // Items: if a date range is provided, join to orders to restrict by order.created_at,
-    // otherwise sum from order_items globally
     const itemsSql = range ? `
       SELECT IFNULL(SUM(oi.quantity), 0) AS totalItemsSold
       FROM order_items oi
@@ -140,7 +116,6 @@ router.get("/stats", authMiddleware, (req, res) => {
       FROM order_items;
     `;
 
-    // Products & Users (no date filter here — these are global inventory/user counts)
     const productsSql = `
       SELECT
         COUNT(*) AS totalProducts,
@@ -150,34 +125,28 @@ router.get("/stats", authMiddleware, (req, res) => {
       FROM products;
     `;
 
-    const usersSql = `SELECT COUNT(*) AS totalUsers FROM users;`;
+    // ✅ Extended to compute gender stats
+    const usersSql = `
+      SELECT 
+        COUNT(*) AS totalUsers,
+        SUM(CASE WHEN LOWER(gender) = 'male' THEN 1 ELSE 0 END) AS maleUsers,
+        SUM(CASE WHEN LOWER(gender) = 'female' THEN 1 ELSE 0 END) AS femaleUsers,
+        SUM(CASE WHEN gender IS NULL OR LOWER(gender) NOT IN ('male','female') THEN 1 ELSE 0 END) AS otherUsers
+      FROM users;
+    `;
 
-    // Execute queries sequentially reusing whereParams for the filtered queries
     db.get(ordersSql, whereParams, (err, orderStats) => {
-      if (err) {
-        console.error("DB error (ordersSql)", err);
-        return res.status(500).json({ message: "Database error (orders)", error: err.message });
-      }
+      if (err) return res.status(500).json({ message: "Database error (orders)", error: err.message });
 
       db.get(itemsSql, whereParams, (err, itemStats) => {
-        if (err) {
-          console.error("DB error (itemsSql)", err);
-          return res.status(500).json({ message: "Database error (items)", error: err.message });
-        }
+        if (err) return res.status(500).json({ message: "Database error (items)", error: err.message });
 
         db.get(productsSql, [], (err, productStats) => {
-          if (err) {
-            console.error("DB error (productsSql)", err);
-            return res.status(500).json({ message: "Database error (products)", error: err.message });
-          }
+          if (err) return res.status(500).json({ message: "Database error (products)", error: err.message });
 
           db.get(usersSql, [], (err, userStats) => {
-            if (err) {
-              console.error("DB error (usersSql)", err);
-              return res.status(500).json({ message: "Database error (users)", error: err.message });
-            }
+            if (err) return res.status(500).json({ message: "Database error (users)", error: err.message });
 
-            // Respond with combined stats matching the frontend's expectations
             res.json({
               // Orders
               totalOrders: orderStats?.totalOrders ?? 0,
@@ -189,7 +158,7 @@ router.get("/stats", authMiddleware, (req, res) => {
               totalSales: orderStats?.totalSales ?? 0,
               totalItemsSold: itemStats?.totalItemsSold ?? 0,
 
-              // Products (kept global)
+              // Products
               total: productStats?.totalProducts ?? 0,
               sold: productStats?.soldProducts ?? 0,
               inStock: productStats?.inStock ?? 0,
@@ -197,6 +166,9 @@ router.get("/stats", authMiddleware, (req, res) => {
 
               // Users
               totalUsers: userStats?.totalUsers ?? 0,
+              maleUsers: userStats?.maleUsers ?? 0,
+              femaleUsers: userStats?.femaleUsers ?? 0,
+              otherUsers: userStats?.otherUsers ?? 0,
             });
           });
         });
@@ -209,4 +181,3 @@ router.get("/stats", authMiddleware, (req, res) => {
 });
 
 export default router;
-
