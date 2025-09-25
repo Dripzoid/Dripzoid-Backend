@@ -24,6 +24,22 @@ router.get("/", auth, (req, res) => {
   });
 });
 
+router.get("/:userId", auth, (req, res) => {
+  const { userId } = req.params;
+  const sql = `
+    SELECT w.id, w.product_id, p.name, p.price, p.images, w.created_at
+    FROM wishlist_items w
+    JOIN products p ON w.product_id = p.id
+    WHERE w.user_id = ?
+    ORDER BY w.created_at DESC
+  `;
+  db.all(sql, [userId], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+
 /**
  * POST /api/wishlist/move-to-cart
  * Move multiple wishlist items to cart
@@ -132,5 +148,6 @@ router.delete("/:productId", auth, (req, res) => {
 
 
 export default router;
+
 
 
