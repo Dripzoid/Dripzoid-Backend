@@ -534,6 +534,61 @@ app.get("/api/users", async (req, res) => {
   }
 });
 
+// backend/routes/users.js
+app.get("/api/users/active-status", async (req, res) => {
+  try {
+    const since = new Date();
+    since.setDate(since.getDate() - 7);
+    const sinceIso = since.toISOString();
+
+    // Fetch all users
+    const users = await runAll(`SELECT id, name, email, created_at FROM users`);
+
+    // Tables/columns to check for activity
+    const activitySources = [
+      { table: "wishlist_items", col: "created_at" },
+      { table: "user_activity", col: "created_at" },
+      { table: "orders", col: "created_at" },
+      { table: "users", col: "created_at" }, // account creation counts as activity
+      { table: "cart_items", col: "added_at" },
+      { table: "user_sessions", col: "last_active" },
+      { table: "questions", col: "createdAt" },
+      { table: "reviews", col: "createdAt" },
+    ];
+
+    const results = [];
+
+    for (const u of users) {
+      let isActive = false;
+
+      for (const { table, col } of activitySources) {
+        const row = await runGet(
+          `SELECT 1 FROM ${table} WHERE user_id = ? AND ${col} >= ? LIMIT 1`,
+          [u.id, sinceIso]
+        );
+        if (row) {
+          isActive = true;
+          break;
+        }
+      }
+
+      results.push({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        active: isActive,
+        checked_since: sinceIso,
+      });
+    }
+
+    res.json(results);
+  } catch (err) {
+    console.error("Failed to check bulk user activity", err);
+    res.status(500).json({ error: "Failed to check user activity" });
+  }
+});
+
+
 /**
  * Get single user by ID
  */
@@ -822,6 +877,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
