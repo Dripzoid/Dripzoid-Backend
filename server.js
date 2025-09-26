@@ -582,7 +582,7 @@ app.get("/api/users", async (req, res) => {
       GROUP BY order_id
   ) oi_sum ON o.id = oi_sum.order_id
   WHERE o.user_id = ?
-`, [u.id]);
+`, [u.id])
 
       ]);
 
@@ -944,6 +944,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
