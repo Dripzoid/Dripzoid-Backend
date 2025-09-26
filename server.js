@@ -538,11 +538,8 @@ app.get("/api/users", async (req, res) => {
       { table: "wishlist_items", col: "created_at" },
       { table: "user_activity", col: "created_at" },
       { table: "orders", col: "created_at" },
-      { table: "users", col: "created_at" }, // signup counts as activity
       { table: "cart_items", col: "added_at" },
-      { table: "user_sessions", col: "last_active" },
-      { table: "questions", col: "createdAt" },
-      { table: "reviews", col: "createdAt" },
+      { table: "user_sessions", col: "last_active" }
     ];
 
     const enriched = [];
@@ -863,6 +860,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
