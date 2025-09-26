@@ -525,7 +525,7 @@ app.get(
 app.get("/api/users", async (req, res) => {
   try {
     const since = new Date();
-    since.setDate(since.getDate() - 7);
+    since.setDate(since.getDate() - 7); // 7-day activity window
     const sinceIso = since.toISOString();
 
     // Fetch all users
@@ -533,13 +533,17 @@ app.get("/api/users", async (req, res) => {
       `SELECT id, name, email, phone, is_admin, created_at, gender, dob FROM users`
     );
 
-    // Activity sources
+    // Activity sources (tables + column + field that points to users.id)
     const activitySources = [
-      { table: "wishlist_items", col: "created_at" },
-      { table: "user_activity", col: "created_at" },
-      { table: "orders", col: "created_at" },
-      { table: "cart_items", col: "added_at" },
-      { table: "user_sessions", col: "last_active" }
+      { table: "wishlist_items", col: "created_at", userField: "user_id" },
+      { table: "users", col: "created_at", userField: "id" }, // signup counts as activity
+      { table: "user_activity", col: "created_at", userField: "user_id" },
+      { table: "orders", col: "created_at", userField: "user_id" },
+      { table: "cart_items", col: "added_at", userField: "user_id" },
+      { table: "user_sessions", col: "last_active", userField: "user_id" },
+      { table: "questions", col: "createdAt", userField: "userId" },
+      { table: "answers", col: "createdAt", userField: "userId" },
+      { table: "reviews", col: "createdAt", userField: "userId" },
     ];
 
     const enriched = [];
@@ -547,9 +551,9 @@ app.get("/api/users", async (req, res) => {
     for (const u of users) {
       let isActive = false;
 
-      for (const { table, col } of activitySources) {
+      for (const { table, col, userField } of activitySources) {
         const row = await runGet(
-          `SELECT 1 FROM ${table} WHERE user_id = ? AND ${col} >= ? LIMIT 1`,
+          `SELECT 1 FROM ${table} WHERE ${userField} = ? AND ${col} >= ? LIMIT 1`,
           [u.id, sinceIso]
         );
         if (row) {
@@ -571,6 +575,7 @@ app.get("/api/users", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch users" });
   }
 });
+
 
 /**
  * Get single user by ID
@@ -860,6 +865,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
