@@ -576,7 +576,7 @@ runGet(
    FROM orders
    WHERE user_id = ?
      AND LOWER(status) IN ('delivered')`,
-  [userId]
+  [u.id]
 ),
 
 // Count Cancelled/Returned orders (case-insensitive)
@@ -585,7 +585,7 @@ runGet(
    FROM orders
    WHERE user_id = ?
      AND LOWER(status) IN ('cancelled', 'returned')`,
-  [userId]
+  [u.id]
 ),
         runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [u.id]),
        runGet(`
@@ -654,7 +654,7 @@ app.get("/api/users/:id", async (req, res) => {
       totalSpendRes,
       couponSavingsRes
     ] = await Promise.all([
-      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [u.id]),
+      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [userId]),
      // Count Delivered orders (case-insensitive)
 runGet(
   `SELECT COUNT(*) AS count
@@ -976,6 +976,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
