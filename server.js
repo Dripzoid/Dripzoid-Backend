@@ -582,16 +582,60 @@ app.get("/api/users", async (req, res) => {
  */
 app.get("/api/users/:id", async (req, res) => {
   try {
-    const rows = await runQuery(
-      `SELECT id, name, email, phone, is_admin, created_at, gender, dob FROM users WHERE id = ?`,
-      [req.params.id]
+    const userId = req.params.id;
+
+    // Fetch user basic info
+    const users = await runQuery(
+      `SELECT id, name, email, phone, is_admin, created_at, gender, dob
+       FROM users WHERE id = ?`,
+      [userId]
     );
-    if (rows.length === 0) return res.status(404).json({ error: "User not found" });
-    res.json(rows[0]);
+    if (users.length === 0) return res.status(404).json({ error: "User not found" });
+
+    const user = users[0];
+
+    // Aggregate stats
+    const [
+      totalOrdersRes,
+      successfulOrdersRes,
+      cancelledOrdersRes,
+      inProgressOrdersRes,
+      totalSpendRes,
+      couponSavingsRes
+    ] = await Promise.all([
+      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [userId]),
+      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status = 'Delivered'`, [userId]),
+      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status IN ('Cancelled', 'Returned')`, [userId]),
+      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status = 'in_progress'`, [userId]),
+      runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [userId]),
+      runGet(`
+        SELECT 
+          SUM(o.total_amount) - SUM(oi.price) as savings
+        FROM orders o
+        JOIN order_items oi ON o.id = oi.order_id
+        WHERE o.user_id = ?`,
+        [userId]
+      )
+    ]);
+
+    const enrichedUser = {
+      ...user,
+      role: user.is_admin === 1 ? "admin" : "customer",
+      totalOrders: totalOrdersRes?.count ?? 0,
+      successfulOrders: successfulOrdersRes?.count ?? 0,
+      cancelledOrders: cancelledOrdersRes?.count ?? 0,
+      inProgressOrders: inProgressOrdersRes?.count ?? 0,
+      totalSpend: totalSpendRes?.total ?? 0,
+      couponSavings: couponSavingsRes?.savings ?? 0,
+    };
+
+    res.json(enrichedUser);
   } catch (err) {
+    console.error("Fetch user error:", err);
     res.status(500).json({ error: "Failed to fetch user" });
   }
 });
+
 
 /**
  * Update user (role, status, etc.)
@@ -865,6 +909,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
