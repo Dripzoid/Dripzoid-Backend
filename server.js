@@ -567,38 +567,37 @@ app.get("/api/users", async (req, res) => {
         successfulOrdersRes,
         cancelledOrdersRes,
         totalSpendRes,
-        couponSavingsRes
+        couponSavingsRes,
+        lastActiveRes
       ] = await Promise.all([
         runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [u.id]),
-        // Count Delivered orders (case-insensitive)
-runGet(
-  `SELECT COUNT(*) AS count
-   FROM orders
-   WHERE user_id = ?
-     AND LOWER(status) IN ('delivered')`,
-  [u.id]
-),
-
-// Count Cancelled/Returned orders (case-insensitive)
-runGet(
-  `SELECT COUNT(*) AS count
-   FROM orders
-   WHERE user_id = ?
-     AND LOWER(status) IN ('cancelled', 'returned')`,
-  [u.id]
-),
+        runGet(
+          `SELECT COUNT(*) AS count
+           FROM orders
+           WHERE user_id = ?
+             AND LOWER(status) IN ('delivered')`,
+          [u.id]
+        ),
+        runGet(
+          `SELECT COUNT(*) AS count
+           FROM orders
+           WHERE user_id = ?
+             AND LOWER(status) IN ('cancelled', 'returned')`,
+          [u.id]
+        ),
         runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [u.id]),
-       runGet(`
-  SELECT SUM(o.total_amount - oi_sum.order_items_sum) AS savings
-  FROM orders o
-  JOIN (
-      SELECT order_id, SUM(price) AS order_items_sum
-      FROM order_items
-      GROUP BY order_id
-  ) oi_sum ON o.id = oi_sum.order_id
-  WHERE o.user_id = ?
-`, [u.id])
-
+        runGet(`
+          SELECT SUM(o.total_amount - oi_sum.order_items_sum) AS savings
+          FROM orders o
+          JOIN (
+              SELECT order_id, SUM(price) AS order_items_sum
+              FROM order_items
+              GROUP BY order_id
+          ) oi_sum ON o.id = oi_sum.order_id
+          WHERE o.user_id = ?
+        `, [u.id]),
+        // Fetch last_active from user_sessions (latest timestamp)
+        runGet(`SELECT MAX(last_active) AS last_active FROM user_sessions WHERE user_id = ?`, [u.id])
       ]);
 
       const totalOrders = totalOrdersRes?.count ?? 0;
@@ -616,6 +615,7 @@ runGet(
         inProgressOrders,
         totalSpend: totalSpendRes?.total ?? 0,
         couponSavings: couponSavingsRes?.savings ?? 0,
+        last_active: lastActiveRes?.last_active || null, // added field
       });
     }
 
@@ -976,6 +976,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
