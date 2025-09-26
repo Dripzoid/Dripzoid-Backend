@@ -533,10 +533,9 @@ app.get("/api/users", async (req, res) => {
       `SELECT id, name, email, phone, is_admin, created_at, gender, dob FROM users`
     );
 
-    // Activity sources (tables + column + field that points to users.id)
     const activitySources = [
       { table: "wishlist_items", col: "created_at", userField: "user_id" },
-      { table: "users", col: "created_at", userField: "id" }, // signup counts as activity
+      { table: "users", col: "created_at", userField: "id" },
       { table: "user_activity", col: "created_at", userField: "user_id" },
       { table: "orders", col: "created_at", userField: "user_id" },
       { table: "cart_items", col: "added_at", userField: "user_id" },
@@ -549,8 +548,8 @@ app.get("/api/users", async (req, res) => {
     const enriched = [];
 
     for (const u of users) {
+      // Check 7-day activity
       let isActive = false;
-
       for (const { table, col, userField } of activitySources) {
         const row = await runGet(
           `SELECT 1 FROM ${table} WHERE ${userField} = ? AND ${col} >= ? LIMIT 1`,
@@ -562,10 +561,42 @@ app.get("/api/users", async (req, res) => {
         }
       }
 
+      // Fetch order stats
+      const [
+        totalOrdersRes,
+        successfulOrdersRes,
+        cancelledOrdersRes,
+        totalSpendRes,
+        couponSavingsRes
+      ] = await Promise.all([
+        runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [u.id]),
+        runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status = 'Delivered'`, [u.id]),
+        runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status IN ('Cancelled', 'Returned')`, [u.id]),
+        runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [u.id]),
+        runGet(`
+          SELECT SUM(o.total_amount) - SUM(oi.price) as savings
+          FROM orders o
+          JOIN order_items oi ON o.id = oi.order_id
+          WHERE o.user_id = ?`,
+          [u.id]
+        )
+      ]);
+
+      const totalOrders = totalOrdersRes?.count ?? 0;
+      const successfulOrders = successfulOrdersRes?.count ?? 0;
+      const cancelledOrders = cancelledOrdersRes?.count ?? 0;
+      const inProgressOrders = totalOrders - (successfulOrders + cancelledOrders);
+
       enriched.push({
         ...u,
         role: u.is_admin === 1 ? "admin" : "customer",
         status: isActive ? "active" : "inactive",
+        totalOrders,
+        successfulOrders,
+        cancelledOrders,
+        inProgressOrders,
+        totalSpend: totalSpendRes?.total ?? 0,
+        couponSavings: couponSavingsRes?.savings ?? 0,
       });
     }
 
@@ -575,6 +606,7 @@ app.get("/api/users", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch users" });
   }
 });
+
 
 
 /**
@@ -606,7 +638,6 @@ app.get("/api/users/:id", async (req, res) => {
       runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [userId]),
       runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status = 'Delivered'`, [userId]),
       runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status IN ('Cancelled', 'Returned')`, [userId]),
-      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status = 'in_progress'`, [userId]),
       runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [userId]),
       runGet(`
         SELECT 
@@ -617,7 +648,7 @@ app.get("/api/users/:id", async (req, res) => {
         [userId]
       )
     ]);
-
+  const inProgressOrders = totalOrders - (successfulOrders + cancelledOrders);
     const enrichedUser = {
       ...user,
       role: user.is_admin === 1 ? "admin" : "customer",
@@ -909,6 +940,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
