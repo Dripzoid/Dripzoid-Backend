@@ -570,8 +570,23 @@ app.get("/api/users", async (req, res) => {
         couponSavingsRes
       ] = await Promise.all([
         runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [u.id]),
-        runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status = 'Delivered'`, [u.id]),
-        runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status IN ('Cancelled', 'Returned')`, [u.id]),
+        // Count Delivered orders (case-insensitive)
+runGet(
+  `SELECT COUNT(*) AS count
+   FROM orders
+   WHERE user_id = ?
+     AND LOWER(status) IN ('delivered')`,
+  [userId]
+),
+
+// Count Cancelled/Returned orders (case-insensitive)
+runGet(
+  `SELECT COUNT(*) AS count
+   FROM orders
+   WHERE user_id = ?
+     AND LOWER(status) IN ('cancelled', 'returned')`,
+  [userId]
+),
         runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [u.id]),
        runGet(`
   SELECT SUM(o.total_amount - oi_sum.order_items_sum) AS savings
@@ -639,24 +654,25 @@ app.get("/api/users/:id", async (req, res) => {
       totalSpendRes,
       couponSavingsRes
     ] = await Promise.all([
-      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [userId]),
-      // Count Delivered orders
-      runGet(
-        `SELECT COUNT(*) AS count 
-         FROM orders 
-         WHERE user_id = ? 
-           AND status IN ('Delivered')`,
-        [userId]
-      );
+      runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [u.id]),
+     // Count Delivered orders (case-insensitive)
+runGet(
+  `SELECT COUNT(*) AS count
+   FROM orders
+   WHERE user_id = ?
+     AND LOWER(status) IN ('delivered')`,
+  [userId]
+),
 
-      // Count Cancelled/Returned orders
-      runGet(
-        `SELECT COUNT(*) AS count 
-         FROM orders 
-         WHERE user_id = ? 
-           AND status IN ('Cancelled', 'Returned')`,
-        [userId]
-      );
+// Count Cancelled/Returned orders (case-insensitive)
+runGet(
+  `SELECT COUNT(*) AS count
+   FROM orders
+   WHERE user_id = ?
+     AND LOWER(status) IN ('cancelled', 'returned')`,
+  [userId]
+),
+
 
       runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [userId]),
       runGet(`
@@ -960,6 +976,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
