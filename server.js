@@ -573,13 +573,17 @@ app.get("/api/users", async (req, res) => {
         runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status = 'Delivered'`, [u.id]),
         runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ? AND status IN ('Cancelled', 'Returned')`, [u.id]),
         runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [u.id]),
-        runGet(`
-          SELECT SUM(o.total_amount) - SUM(oi.price) as savings
-          FROM orders o
-          JOIN order_items oi ON o.id = oi.order_id
-          WHERE o.user_id = ?`,
-          [u.id]
-        )
+       runGet(`
+  SELECT SUM(o.total_amount - oi_sum.order_items_sum) AS savings
+  FROM orders o
+  JOIN (
+      SELECT order_id, SUM(price) AS order_items_sum
+      FROM order_items
+      GROUP BY order_id
+  ) oi_sum ON o.id = oi_sum.order_id
+  WHERE o.user_id = ?
+`, [u.id]);
+
       ]);
 
       const totalOrders = totalOrdersRes?.count ?? 0;
@@ -940,6 +944,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
