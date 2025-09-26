@@ -204,15 +204,26 @@ router.get("/:id", authenticateToken, (req, res) => {
     const requestedUserId = Number(req.params.id);
     const loggedInUserId = Number(req.user?.id);
 
-    if (!requestedUserId) return res.status(400).json({ message: "Invalid user ID" });
+    if (!requestedUserId) 
+      return res.status(400).json({ message: "Invalid user ID" });
 
-    // Optional: Only allow users to fetch their own cart (or admin override if needed)
+    // Only allow users to fetch their own cart
     if (requestedUserId !== loggedInUserId) {
       return res.status(403).json({ message: "Forbidden: Cannot access another user's cart" });
     }
 
     db.all(
-      "SELECT c.id, c.product_id, c.quantity, p.name AS product_name, p.price FROM cart_items c LEFT JOIN products p ON c.product_id = p.id WHERE c.user_id = ?",
+      `SELECT 
+         c.id, 
+         c.product_id, 
+         c.quantity, 
+         c.size, 
+         c.color, 
+         p.name AS product_name, 
+         p.price 
+       FROM cart_items c 
+       LEFT JOIN products p ON c.product_id = p.id 
+       WHERE c.user_id = ?`,
       [requestedUserId],
       (err, rows) => {
         if (err) {
@@ -228,6 +239,7 @@ router.get("/:id", authenticateToken, (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 
 /**
@@ -287,6 +299,7 @@ router.delete("/:id", authenticateToken, (req, res) => {
 });
 
 export default router;
+
 
 
 
