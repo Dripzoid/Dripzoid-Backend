@@ -319,9 +319,12 @@ function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success",
 
 // createSessionAndRespond: used by OAuth callback — requires req & res
 function createSessionAndRespond(req, res, user, actionLabel) {
-  db.run(
-    "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-    [user.id, getDevice(req), getIP(req)],
+  const now = new Date().toISOString(); // current timestamp in ISO format
+
+db.run(
+  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+  [row.id, getDevice(req), getIP(req), now],
+
     function (sessErr) {
       if (sessErr) {
         console.error("Session insert error:", sessErr);
@@ -363,9 +366,12 @@ app.post("/api/register", async (req, res) => {
         db.get("SELECT * FROM users WHERE id = ?", [createdUserId], (err2, userRow) => {
           if (err2 || !userRow) return res.status(500).json({ message: "DB error" });
 
-          db.run(
-            "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-            [userRow.id, getDevice(req), getIP(req)],
+          const now = new Date().toISOString(); // current timestamp in ISO format
+
+db.run(
+  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+  [row.id, getDevice(req), getIP(req), now],
+
             function (sessErr) {
               if (sessErr) return res.status(500).json({ message: "Failed to create session" });
               const sessionId = this.lastID;
@@ -396,9 +402,11 @@ app.post("/api/login", (req, res) => {
       const isMatch = await bcrypt.compare(password, row.password);
       if (!isMatch) return res.status(401).json({ message: "Invalid password" });
 
-      db.run(
-        "INSERT INTO user_sessions (user_id, device, ip) VALUES (?, ?, ?)",
-        [row.id, getDevice(req), getIP(req)],
+      const now = new Date().toISOString(); // current timestamp in ISO format
+
+db.run(
+  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+  [row.id, getDevice(req), getIP(req), now],
         function (sessErr) {
           if (sessErr) return res.status(500).json({ message: "Failed to create session" });
           const sessionId = this.lastID;
@@ -976,6 +984,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
