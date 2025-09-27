@@ -47,17 +47,14 @@ async function checkServiceability(destPincode, cod = true, weight = 0.5) {
           cod: cod ? 1 : 0,
           weight,
         },
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       }
     );
 
-    // Extract only relevant courier info
-    return res.data?.data?.map(courier => ({
-      courier_name: courier.name,
-      estimated_delivery_days: courier.transit_time,
-      cod: courier.cod,
-      shipping_charges: courier.shipping_charges,
-    })) || [];
+    // Shiprocket returns an object; array is inside data.available_couriers
+    return res.data?.data?.available_couriers || [];
   } catch (err) {
     console.error(
       "Shiprocket Serviceability Error:",
@@ -66,5 +63,6 @@ async function checkServiceability(destPincode, cod = true, weight = 0.5) {
     throw new Error("Failed to check serviceability");
   }
 }
+
 
 export { getToken, checkServiceability };
