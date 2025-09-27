@@ -1,6 +1,6 @@
 // routes/shipping.js
 import express from "express";
-import { checkServiceability } from "../shiprocket.js";
+import { checkServiceability } from "./shiprocket.js";
 
 const router = express.Router();
 
