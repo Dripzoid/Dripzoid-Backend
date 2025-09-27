@@ -13,17 +13,12 @@ let tokenExpiry = null;
  * Get or refresh Shiprocket token
  */
 async function getToken() {
-  if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
-    return cachedToken;
-  }
+  if (cachedToken && tokenExpiry && new Date() < tokenExpiry) return cachedToken;
 
   try {
     const res = await axios.post(
       "https://apiv2.shiprocket.in/v1/external/auth/login",
-      {
-        email: SHIPROCKET_EMAIL,
-        password: SHIPROCKET_PASSWORD,
-      }
+      { email: SHIPROCKET_EMAIL, password: SHIPROCKET_PASSWORD }
     );
 
     cachedToken = res.data.token;
@@ -38,9 +33,6 @@ async function getToken() {
 
 /**
  * Check serviceability between warehouse and customer pincode
- * @param {string} destPincode - Customer pincode
- * @param {boolean} cod - true if COD, false if prepaid
- * @param {number} weight - Weight in KG (default 0.5kg)
  */
 async function checkServiceability(destPincode, cod = true, weight = 0.5) {
   try {
@@ -55,14 +47,17 @@ async function checkServiceability(destPincode, cod = true, weight = 0.5) {
           cod: cod ? 1 : 0,
           weight,
         },
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       }
     );
 
-    // Shiprocket usually returns result in res.data.data
-    return res.data?.data || res.data;
+    // Extract only relevant courier info
+    return res.data?.data?.map(courier => ({
+      courier_name: courier.name,
+      estimated_delivery_days: courier.transit_time,
+      cod: courier.cod,
+      shipping_charges: courier.shipping_charges,
+    })) || [];
   } catch (err) {
     console.error(
       "Shiprocket Serviceability Error:",
