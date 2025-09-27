@@ -594,16 +594,20 @@ app.get("/api/users", async (req, res) => {
           [u.id]
         ),
         runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [u.id]),
-        runGet(`
-          SELECT SUM(o.total_amount - oi_sum.order_items_sum) AS savings
-          FROM orders o
-          JOIN (
-              SELECT order_id, SUM(price) AS order_items_sum
-              FROM order_items
-              GROUP BY order_id
-          ) oi_sum ON o.id = oi_sum.order_id
-          WHERE o.user_id = ?
-        `, [u.id]),
+       runGet(`
+  SELECT 
+    SUM(
+      oi_sum.order_items_sum - o.total_amount + 
+      CASE WHEN LOWER(o.payment_method) = 'cod' THEN 25 ELSE 0 END
+    ) AS savings
+  FROM orders o
+  JOIN (
+      SELECT order_id, SUM(price) AS order_items_sum
+      FROM order_items
+      GROUP BY order_id
+  ) oi_sum ON o.id = oi_sum.order_id
+  WHERE o.user_id = ?
+`, [u.id]),
         // Fetch last_active from user_sessions (latest timestamp)
         runGet(`SELECT MAX(last_active) AS last_active FROM user_sessions WHERE user_id = ?`, [u.id])
       ]);
@@ -984,6 +988,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
