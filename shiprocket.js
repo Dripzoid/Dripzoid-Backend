@@ -36,9 +36,15 @@ async function getToken() {
  * Check serviceability between warehouse and customer pincode
  * @param {string} destPincode - Customer pincode
  * @param {boolean} cod - COD true/false
- * @param {number} weight - weight in KG (default 0.5)
+ * @param {number} weight - weight in KG (default 1kg)
+ * @param {object} dimensions - length, breadth, height in cm (default 10x10x10)
  */
-async function checkServiceability(destPincode, cod = true, weight = 1) {
+async function checkServiceability(
+  destPincode,
+  cod = true,
+  weight = 1,
+  dimensions = { length: 10, breadth: 10, height: 10 }
+) {
   try {
     const token = await getToken();
 
@@ -50,6 +56,9 @@ async function checkServiceability(destPincode, cod = true, weight = 1) {
           delivery_postcode: destPincode,
           cod: cod ? 1 : 0,
           weight,
+          length: dimensions.length,
+          breadth: dimensions.breadth,
+          height: dimensions.height,
         },
         headers: { Authorization: `Bearer ${token}` },
       }
