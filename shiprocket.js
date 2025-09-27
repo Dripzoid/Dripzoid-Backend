@@ -3,7 +3,6 @@ import axios from "axios";
 
 const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
 const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
-
 const WAREHOUSE_PINCODE = "533450"; // default warehouse pincode
 
 let cachedToken = null;
@@ -13,7 +12,9 @@ let tokenExpiry = null;
  * Get or refresh Shiprocket token
  */
 async function getToken() {
-  if (cachedToken && tokenExpiry && new Date() < tokenExpiry) return cachedToken;
+  if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
+    return cachedToken;
+  }
 
   try {
     const res = await axios.post(
@@ -22,7 +23,7 @@ async function getToken() {
     );
 
     cachedToken = res.data.token;
-    tokenExpiry = new Date(Date.now() + 23 * 60 * 60 * 1000); // 23h expiry
+    tokenExpiry = new Date(Date.now() + 23 * 60 * 60 * 1000); // expires in 23h
 
     return cachedToken;
   } catch (err) {
@@ -33,6 +34,9 @@ async function getToken() {
 
 /**
  * Check serviceability between warehouse and customer pincode
+ * @param {string} destPincode - Customer pincode
+ * @param {boolean} cod - COD true/false
+ * @param {number} weight - weight in KG (default 0.5)
  */
 async function checkServiceability(destPincode, cod = true, weight = 0.5) {
   try {
@@ -47,13 +51,11 @@ async function checkServiceability(destPincode, cod = true, weight = 0.5) {
           cod: cod ? 1 : 0,
           weight,
         },
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       }
     );
 
-    // Shiprocket returns an object; array is inside data.available_couriers
+    // Return array of available couriers, empty if none
     return res.data?.data?.available_couriers || [];
   } catch (err) {
     console.error(
@@ -63,6 +65,5 @@ async function checkServiceability(destPincode, cod = true, weight = 0.5) {
     throw new Error("Failed to check serviceability");
   }
 }
-
 
 export { getToken, checkServiceability };
