@@ -38,7 +38,7 @@ async function getToken() {
  * @param {boolean} cod - COD true/false
  * @param {number} weight - weight in KG (default 0.5)
  */
-async function checkServiceability(destPincode, cod = true, weight = 0.5) {
+async function checkServiceability(destPincode, cod = true, weight = 1) {
   try {
     const token = await getToken();
 
