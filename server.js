@@ -36,6 +36,8 @@ import votesRouter from "./votes.js";
 
 import otpRoutes from "./OtpVerification.js";
 
+import shippingRoutes from "./shipping.js"; 
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -953,6 +955,7 @@ app.use("/api/admin", auth, adminStatsRoutes);
 app.use("/api/reviews", reviewsRouter);
 app.use("/api/qa", qaRouter);
 app.use("/api/votes", votesRouter);
+app.use("/api/shipping", shippingRoutes);
 
 // -------------------- Root + Health --------------------
 app.get("/", (req, res) => res.send(`<h2>Dripzoid Backend</h2><p>API available. Use /api routes.</p>`));
@@ -988,6 +991,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
