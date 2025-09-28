@@ -79,7 +79,7 @@ router.get("/estimate", async (req, res) => {
     res.set("Surrogate-Control", "no-store");
 
     // Call Shiprocket serviceability
-    const estimate = await checkServiceability(opts);
+   const estimate = await checkServiceability(Number(pin), opts);
 
     return res.json({
       success: true,
