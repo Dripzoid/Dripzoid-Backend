@@ -35,7 +35,7 @@ router.get("/estimate", async (req, res) => {
         .json({ success: false, message: "pin (delivery_postcode) is required" });
     }
 
-    // Either order_id OR (cod + weight) is required
+    // Either order_id OR both cod and weight must be provided
     if (!order_id && codRaw === undefined) {
       return res.status(400).json({
         success: false,
@@ -47,9 +47,9 @@ router.get("/estimate", async (req, res) => {
     // Normalize parameters
     const cod = codRaw !== undefined
       ? (String(codRaw) === "1" || String(codRaw).toLowerCase() === "true" ? 1 : 0)
-      : undefined;
+      : 0; // default 0 if missing
 
-    // Default weight to "1" (string)
+    // Default weight to "1" (string) if not provided
     const weight = weightRaw ? String(weightRaw) : "1";
 
     // Default dimensions
@@ -60,7 +60,7 @@ router.get("/estimate", async (req, res) => {
     const opts = {
       order_id: order_id ?? undefined,
       cod: cod,
-      weight: weight, // <-- string
+      weight: weight, // string
       length: shipmentLength,
       breadth: shipmentBreadth,
       height: shipmentHeight,
@@ -68,7 +68,7 @@ router.get("/estimate", async (req, res) => {
       mode: mode ?? undefined,
       is_return: is_return !== undefined ? Number(is_return) : 0,
       qc_check: qc_check !== undefined ? Number(qc_check) : 0,
-      pickup_postcode: process.env.WAREHOUSE_PIN || 533450,
+      pickup_postcode: process.env.WAREHOUSE_PIN || 533450, // your verified warehouse
       delivery_postcode: Number(pin),
     };
 
