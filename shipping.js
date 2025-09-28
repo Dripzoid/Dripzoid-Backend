@@ -15,15 +15,32 @@ const router = express.Router();
  */
 router.get("/estimate", async (req, res) => {
   try {
-    const { pin, cod, weight, order_id, length, breadth, height, declared_value, mode, is_return, qc_check } = req.query;
+    const {
+      pin,
+      cod,
+      weight,
+      order_id,
+      length,
+      breadth,
+      height,
+      declared_value,
+      mode,
+      is_return,
+      qc_check,
+    } = req.query;
 
     if (!pin) {
-      return res.status(400).json({ success: false, message: "pin (delivery_postcode) is required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "pin (delivery_postcode) is required" });
     }
 
     // either order_id OR (cod + weight) required — shiprocket docs
-    if (!order_id && (cod === undefined && weight === undefined)) {
-      return res.status(400).json({ success: false, message: "Either order_id or both cod and weight are required" });
+    if (!order_id && (cod === undefined || weight === undefined)) {
+      return res.status(400).json({
+        success: false,
+        message: "Either order_id or both cod and weight are required",
+      });
     }
 
     // Disable caching for dynamic results
@@ -32,24 +49,21 @@ router.get("/estimate", async (req, res) => {
     res.set("Expires", "0");
     res.set("Surrogate-Control", "no-store");
 
+    // Build options object to forward to serviceability checker
     const opts = {
       order_id: order_id ?? undefined,
-      cod: cod === undefined ? undefined : (String(cod) === "1" || String(cod).toLowerCase() === "true"),
-      weight: weight ?? undefined,
-      length: length ? Number(length) : undefined,
-      breadth: breadth ? Number(breadth) : undefined,
-      height: height ? Number(height) : undefined,
-      declared_value: declared_value ? Number(declared_value) : undefined,
+      cod: cod !== undefined ? Number(cod) : undefined, // ✅ ensure number 0/1
+      weight: weight ? Number(weight) : undefined,
+      length: length ? Number(length) : 15, // default fallback
+      breadth: breadth ? Number(breadth) : 10,
+      height: height ? Number(height) : 5,
+      declared_value: declared_value ? Number(declared_value) : 100,
       mode: mode ?? undefined,
-      is_return: is_return !== undefined ? Number(is_return) : undefined,
+      is_return: is_return !== undefined ? Number(is_return) : 0, // ✅ required by API
       qc_check: qc_check !== undefined ? Number(qc_check) : undefined,
     };
 
-    const estimate = await checkServiceability(pin, opts.cod, opts.weight, {
-      length: opts.length,
-      breadth: opts.breadth,
-      height: opts.height
-    });
+    const estimate = await checkServiceability(pin, opts);
 
     res.json({
       success: true,
@@ -58,7 +72,10 @@ router.get("/estimate", async (req, res) => {
     });
   } catch (err) {
     console.error("Route /api/shipping/estimate error:", err);
-    res.status(500).json({ success: false, message: err.message || "Server error" });
+    res.status(500).json({
+      success: false,
+      message: err.message || "Server error",
+    });
   }
 });
 
