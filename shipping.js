@@ -70,7 +70,7 @@ router.get("/estimate", async (req, res) => {
       declared_value: declared_value ? Number(declared_value) : 100,
       mode: mode ?? undefined,
       is_return: is_return !== undefined ? Number(is_return) : 0, // required by API (0 = not a return)
-      qc_check: qc_check !== undefined ? Number(qc_check) : undefined,
+      qc_check: qc_check !== undefined ? Number(qc_check) : 0,
     };
 
     // Forward to serviceability checker (shiprocket.js expects an opts object)
