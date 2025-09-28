@@ -9,7 +9,7 @@ const router = express.Router();
  * Query params:
  *  - pin (delivery_postcode) [required]
  *  - cod (1|0) OR order_id (conditional)
- *  - weight (in kgs) (optional; defaults to 1kg)
+ *  - weight (in kgs) [optional; defaults to 1kg]
  *  - length, breadth, height (cm)
  *  - declared_value, mode, is_return, qc_check
  */
@@ -40,7 +40,7 @@ router.get("/estimate", async (req, res) => {
       return res.status(400).json({
         success: false,
         message:
-          "Either order_id or cod must be provided. Weight will default to 1 kg if omitted.",
+          "Either order_id or both cod and weight must be provided.",
       });
     }
 
@@ -49,7 +49,8 @@ router.get("/estimate", async (req, res) => {
       ? (String(codRaw) === "1" || String(codRaw).toLowerCase() === "true" ? 1 : 0)
       : undefined;
 
-    const weight = weightRaw !== undefined ? Number(weightRaw) : 1;
+    // Default weight to "1" (string)
+    const weight = weightRaw ? String(weightRaw) : "1";
 
     // Default dimensions
     const shipmentLength = length ? Number(length) : 15;
@@ -59,7 +60,7 @@ router.get("/estimate", async (req, res) => {
     const opts = {
       order_id: order_id ?? undefined,
       cod: cod,
-      weight: weight > 0 ? weight : 1,
+      weight: weight, // <-- string
       length: shipmentLength,
       breadth: shipmentBreadth,
       height: shipmentHeight,
@@ -67,8 +68,8 @@ router.get("/estimate", async (req, res) => {
       mode: mode ?? undefined,
       is_return: is_return !== undefined ? Number(is_return) : 0,
       qc_check: qc_check !== undefined ? Number(qc_check) : 0,
-      pickup_postcode: process.env.WAREHOUSE_PIN || 533450, // your warehouse PIN
-      delivery_postcode: Number(pin), // from query param
+      pickup_postcode: process.env.WAREHOUSE_PIN || 533450,
+      delivery_postcode: Number(pin),
     };
 
     // Disable caching
