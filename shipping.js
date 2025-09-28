@@ -9,7 +9,7 @@ const router = express.Router();
  * Query params:
  *  - pin (delivery_postcode) [required]
  *  - cod (1|0) OR order_id (conditional)
- *  - weight (in kgs, string) (conditional)
+ *  - weight (in kgs) (optional; defaults to 1kg)
  *  - length, breadth, height (cm)
  *  - declared_value, mode, is_return, qc_check
  */
@@ -17,8 +17,8 @@ router.get("/estimate", async (req, res) => {
   try {
     const {
       pin,
-      cod,
-      weight,
+      cod: codRaw,
+      weight: weightRaw,
       order_id,
       length,
       breadth,
@@ -35,11 +35,13 @@ router.get("/estimate", async (req, res) => {
         .json({ success: false, message: "pin (delivery_postcode) is required" });
     }
 
-    // either order_id OR (cod + weight) required — shiprocket docs
-    if (!order_id && (cod === undefined || weight === undefined)) {
+    // Per Shiprocket docs: either order_id OR (cod + weight) is required.
+    // To make weight optional for callers, we accept cod and default weight to 1kg when missing.
+    if (!order_id && (codRaw === undefined)) {
       return res.status(400).json({
         success: false,
-        message: "Either order_id or both cod and weight are required",
+        message:
+          "Either order_id or cod must be provided. Weight will default to 1 kg if omitted.",
       });
     }
 
@@ -49,30 +51,39 @@ router.get("/estimate", async (req, res) => {
     res.set("Expires", "0");
     res.set("Surrogate-Control", "no-store");
 
-    // Build options object to forward to serviceability checker
+    // Normalize/convert incoming params
+    const cod = codRaw !== undefined
+      ? (String(codRaw) === "1" || String(codRaw).toLowerCase() === "true" ? 1 : 0)
+      : undefined;
+
+    // Default weight to 1 kg if not provided
+    let weight = weightRaw !== undefined ? Number(weightRaw) : 1;
+    if (!Number.isFinite(weight) || weight <= 0) weight = 1;
+
     const opts = {
       order_id: order_id ?? undefined,
-      cod: cod !== undefined ? Number(cod) : undefined, // ✅ ensure number 0/1
-      weight: weight ? Number(weight) : 1,
-      length: length ? Number(length) : 15, // default fallback
+      cod: cod,
+      weight: weight,
+      length: length ? Number(length) : 15, // sensible defaults
       breadth: breadth ? Number(breadth) : 10,
       height: height ? Number(height) : 5,
       declared_value: declared_value ? Number(declared_value) : 100,
       mode: mode ?? undefined,
-      is_return: is_return !== undefined ? Number(is_return) : 0, // ✅ required by API
+      is_return: is_return !== undefined ? Number(is_return) : 0, // required by API (0 = not a return)
       qc_check: qc_check !== undefined ? Number(qc_check) : undefined,
     };
 
+    // Forward to serviceability checker (shiprocket.js expects an opts object)
     const estimate = await checkServiceability(pin, opts);
 
-    res.json({
+    return res.json({
       success: true,
       estimate,
       count: Array.isArray(estimate) ? estimate.length : 0,
     });
   } catch (err) {
     console.error("Route /api/shipping/estimate error:", err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: err.message || "Server error",
     });
