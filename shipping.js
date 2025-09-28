@@ -35,9 +35,8 @@ router.get("/estimate", async (req, res) => {
         .json({ success: false, message: "pin (delivery_postcode) is required" });
     }
 
-    // Per Shiprocket docs: either order_id OR (cod + weight) is required.
-    // To make weight optional for callers, we accept cod and default weight to 1kg when missing.
-    if (!order_id && (codRaw === undefined)) {
+    // Either order_id OR (cod + weight) is required
+    if (!order_id && codRaw === undefined) {
       return res.status(400).json({
         success: false,
         message:
@@ -45,36 +44,41 @@ router.get("/estimate", async (req, res) => {
       });
     }
 
-    // Disable caching for dynamic results
+    // Normalize parameters
+    const cod = codRaw !== undefined
+      ? (String(codRaw) === "1" || String(codRaw).toLowerCase() === "true" ? 1 : 0)
+      : undefined;
+
+    const weight = weightRaw !== undefined ? Number(weightRaw) : 1;
+
+    // Default dimensions
+    const shipmentLength = length ? Number(length) : 15;
+    const shipmentBreadth = breadth ? Number(breadth) : 10;
+    const shipmentHeight = height ? Number(height) : 5;
+
+    const opts = {
+      order_id: order_id ?? undefined,
+      cod: cod,
+      weight: weight > 0 ? weight : 1,
+      length: shipmentLength,
+      breadth: shipmentBreadth,
+      height: shipmentHeight,
+      declared_value: declared_value ? Number(declared_value) : 100,
+      mode: mode ?? undefined,
+      is_return: is_return !== undefined ? Number(is_return) : 0,
+      qc_check: qc_check !== undefined ? Number(qc_check) : 0,
+      pickup_postcode: process.env.WAREHOUSE_PIN || 533450, // your warehouse PIN
+      delivery_postcode: Number(pin), // from query param
+    };
+
+    // Disable caching
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.set("Pragma", "no-cache");
     res.set("Expires", "0");
     res.set("Surrogate-Control", "no-store");
 
-    // Normalize/convert incoming params
-    const cod = codRaw !== undefined
-      ? (String(codRaw) === "1" || String(codRaw).toLowerCase() === "true" ? 1 : 0)
-      : undefined;
-
-    // Default weight to 1 kg if not provided
-    let weight = weightRaw !== undefined ? Number(weightRaw) : 1;
-    if (!Number.isFinite(weight) || weight <= 0) weight = 1;
-
-    const opts = {
-      order_id: order_id ?? undefined,
-      cod: cod,
-      weight: weight,
-      length: length ? Number(length) : 15, // sensible defaults
-      breadth: breadth ? Number(breadth) : 10,
-      height: height ? Number(height) : 5,
-      declared_value: declared_value ? Number(declared_value) : 100,
-      mode: mode ?? undefined,
-      is_return: is_return !== undefined ? Number(is_return) : 0, // required by API (0 = not a return)
-      qc_check: qc_check !== undefined ? Number(qc_check) : 0,
-    };
-
-    // Forward to serviceability checker (shiprocket.js expects an opts object)
-    const estimate = await checkServiceability(pin, opts);
+    // Call Shiprocket serviceability
+    const estimate = await checkServiceability(opts);
 
     return res.json({
       success: true,
