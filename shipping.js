@@ -53,7 +53,7 @@ router.get("/estimate", async (req, res) => {
     const opts = {
       order_id: order_id ?? undefined,
       cod: cod !== undefined ? Number(cod) : undefined, // ✅ ensure number 0/1
-      weight: weight ? Number(weight) : undefined,
+      weight: weight ? Number(weight) : 1,
       length: length ? Number(length) : 15, // default fallback
       breadth: breadth ? Number(breadth) : 10,
       height: height ? Number(height) : 5,
