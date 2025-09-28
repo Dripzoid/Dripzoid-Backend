@@ -3,7 +3,7 @@ import axios from "axios";
 
 const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
 const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
-const WAREHOUSE_PINCODE = process.env.WAREHOUSE_PINCODE || "110001";
+const WAREHOUSE_PINCODE = process.env.WAREHOUSE_PINCODE || "533450";
 const API_BASE = "https://apiv2.shiprocket.in/v1/external";
 
 let cachedToken = null;
