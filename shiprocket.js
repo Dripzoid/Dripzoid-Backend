@@ -34,7 +34,7 @@ async function getToken() {
 }
 
 /**
- * Compute weights (actual, volumetric, chargeable).
+ * Compute weights (actual, volumetric, chargeable)
  */
 function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divisor = 5000 }) {
   const actualWeight = parseFloat(weight) || 0;
@@ -45,7 +45,7 @@ function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divi
     const b = parseFloat(breadth) || 0;
     const h = parseFloat(height) || 0;
     if (l > 0 && b > 0 && h > 0) {
-      volumetricWeight = (l * b * h) / volumetric_divisor; // in kg
+      volumetricWeight = (l * b * h) / volumetric_divisor;
     }
   }
 
@@ -60,7 +60,7 @@ function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divi
 }
 
 /**
- * Build full payload like Shipping Rate Calculator form
+ * Build full payload for rate calculation or order creation
  */
 function buildFullPayload(opts = {}) {
   const pickup_postcode = parseInt(opts.pickup_postcode || WAREHOUSE_PINCODE, 10);
@@ -76,11 +76,9 @@ function buildFullPayload(opts = {}) {
       : 0;
 
   const weight = opts.weight === undefined || opts.weight === "" ? 1.0 : parseFloat(opts.weight);
-
   const length = opts.length ? parseFloat(opts.length) : undefined;
   const breadth = opts.breadth ? parseFloat(opts.breadth) : undefined;
   const height = opts.height ? parseFloat(opts.height) : undefined;
-
   const volumetric_divisor = opts.volumetric_divisor || (opts.aramex ? 6000 : 5000);
 
   const { volumetricWeight, applicableWeight, actualWeight } = computeWeights({
@@ -111,7 +109,46 @@ function buildFullPayload(opts = {}) {
     order_id: opts.order_id || undefined,
     is_return: opts.is_return !== undefined ? Number(opts.is_return) : undefined,
     qc_check: opts.qc_check !== undefined ? Number(opts.qc_check) : undefined,
-    volumetric_divisor,
+    order_items: opts.order_items || undefined,
+    shipping_customer_name: opts.shipping_customer_name,
+    shipping_last_name: opts.shipping_last_name,
+    shipping_address: opts.shipping_address,
+    shipping_address_2: opts.shipping_address_2,
+    shipping_city: opts.shipping_city,
+    shipping_state: opts.shipping_state,
+    shipping_country: opts.shipping_country,
+    shipping_pincode: opts.shipping_pincode,
+    shipping_email: opts.shipping_email,
+    shipping_phone: opts.shipping_phone,
+    billing_customer_name: opts.billing_customer_name,
+    billing_last_name: opts.billing_last_name,
+    billing_address: opts.billing_address,
+    billing_address_2: opts.billing_address_2,
+    billing_city: opts.billing_city,
+    billing_state: opts.billing_state,
+    billing_country: opts.billing_country,
+    billing_pincode: opts.billing_pincode,
+    billing_email: opts.billing_email,
+    billing_phone: opts.billing_phone,
+    order_type: opts.order_type || "regular",
+    invoice_number: opts.invoice_number || undefined,
+    customer_gstin: opts.customer_gstin || undefined,
+    shipping_charges: opts.shipping_charges || 0,
+    giftwrap_charges: opts.giftwrap_charges || 0,
+    transaction_charges: opts.transaction_charges || 0,
+    total_discount: opts.total_discount || 0,
+    sub_total: opts.sub_total || 0,
+    length,
+    breadth,
+    height,
+    weight: actualWeight,
+    ewaybill_no: opts.ewaybill_no || undefined,
+    reseller_name: opts.reseller_name || undefined,
+    company_name: opts.company_name || undefined,
+    comment: opts.comment || undefined,
+    channel_id: opts.channel_id || undefined,
+    pickup_location: opts.pickup_location || undefined,
+    order_date: opts.order_date || undefined,
   };
 
   Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
@@ -120,7 +157,7 @@ function buildFullPayload(opts = {}) {
 }
 
 /**
- * Send full payload to Shiprocket and return normalized courier rates
+ * Calculate shipping rates
  */
 async function calculateRates(opts = {}) {
   const token = await getToken();
@@ -134,11 +171,6 @@ async function calculateRates(opts = {}) {
       },
       timeout: 20000,
     });
-
-    if (process.env.DEBUG_SHIPROCKET === "1") {
-      console.debug("Shiprocket full-rate raw response:", JSON.stringify(res.data, null, 2));
-      console.debug("Payload sent:", JSON.stringify(payload, null, 2));
-    }
 
     let couriers = [];
     if (Array.isArray(res.data?.data?.available_courier_companies)) {
@@ -168,7 +200,7 @@ async function calculateRates(opts = {}) {
 }
 
 /**
- * Check serviceability (lightweight GET or full payload POST)
+ * Check serviceability
  */
 async function checkServiceability(destPincode, opts = {}) {
   if (opts.full_payload) {
@@ -205,18 +237,10 @@ async function checkServiceability(destPincode, opts = {}) {
 
   try {
     const res = await axios.get(`${API_BASE}/courier/serviceability/`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       params,
       timeout: 15000,
     });
-
-    if (process.env.DEBUG_SHIPROCKET === "1") {
-      console.debug("Shiprocket lightweight raw response:", JSON.stringify(res.data, null, 2));
-      console.debug("GET params:", JSON.stringify(params, null, 2));
-    }
 
     let couriers = [];
     if (Array.isArray(res.data?.data?.available_courier_companies)) {
@@ -243,16 +267,13 @@ async function checkServiceability(destPincode, opts = {}) {
 }
 
 /**
- * Create an order
+ * Create an order in Shiprocket
  */
 async function createOrder(orderPayload) {
   const token = await getToken();
   try {
     const res = await axios.post(`${API_BASE}/orders/create/adhoc`, orderPayload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       timeout: 20000,
     });
     return res.data;
@@ -264,16 +285,13 @@ async function createOrder(orderPayload) {
 }
 
 /**
- * Update an order
+ * Update an order in Shiprocket
  */
 async function updateOrder(orderPayload) {
   const token = await getToken();
   try {
     const res = await axios.post(`${API_BASE}/orders/update/adhoc`, orderPayload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       timeout: 20000,
     });
     return res.data;
@@ -284,6 +302,26 @@ async function updateOrder(orderPayload) {
   }
 }
 
+/**
+ * Cancel an order in Shiprocket
+ */
+async function cancelOrder(shiprocketOrderId) {
+  if (!shiprocketOrderId) throw new Error("shiprocket_order_id is required for cancellation");
+  const token = await getToken();
+  try {
+    const res = await axios.post(
+      `${API_BASE}/orders/cancel`,
+      { order_id: shiprocketOrderId },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+    );
+    return res.data;
+  } catch (err) {
+    const remote = err.response?.data || err.message;
+    console.error("Shiprocket cancelOrder Error:", remote);
+    throw new Error("Failed to cancel order: " + (remote?.message || remote));
+  }
+}
+
 export {
   getToken,
   checkServiceability,
@@ -291,6 +329,7 @@ export {
   buildFullPayload,
   createOrder,
   updateOrder,
+  cancelOrder,
 };
 
 export default {
@@ -300,4 +339,5 @@ export default {
   buildFullPayload,
   createOrder,
   updateOrder,
+  cancelOrder,
 };
