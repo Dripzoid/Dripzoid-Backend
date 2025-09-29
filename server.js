@@ -943,8 +943,8 @@ app.get("/api/admin/data-export", auth, (req, res) => {
 const upload = multer({ dest: "/tmp/" });
 app.post("/api/upload-db", upload.single("dbfile"), (req,res)=>{
   try{
-    const token = req.headers["X-Upload-Token"];
-    if(!token || token!==UPLOAD_SECRET) return res.status(403).json({message:"Unauthorized"});
+    const tokenUpload = req.headers["X-Upload-Token"];
+    if(!tokenUpload || tokenUpload!==UPLOAD_SECRET) return res.status(403).json({message:"Unauthorized"});
     if(!req.file) return res.status(400).json({message:"No file uploaded"});
     const tempPath = req.file.path;
     if(path.extname(req.file.originalname)!==".db"){ fs.unlinkSync(tempPath); return res.status(400).json({message:"Only .db allowed"}); }
@@ -1009,6 +1009,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
