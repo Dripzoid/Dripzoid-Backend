@@ -10,7 +10,7 @@ let cachedToken = null;
 let tokenExpiry = null;
 
 /**
- * Authenticate and get Shiprocket token (cached for ~23h).
+ * Authenticate and get Shiprocket token (cached ~23h)
  */
 async function getToken() {
   if (cachedToken && tokenExpiry && new Date() < tokenExpiry) return cachedToken;
@@ -102,7 +102,6 @@ function buildFullPayload(opts = {}) {
     payment_mode: opts.payment_mode || (cod ? "COD" : "Prepaid"),
     declared_value: opts.shipment_value ? parseFloat(opts.shipment_value) : undefined,
     is_dangerous: opts.is_dangerous ? 1 : 0,
-    mode: opts.mode || undefined,
     shipment_type: opts.shipment_type
       ? opts.shipment_type.charAt(0).toUpperCase() + opts.shipment_type.slice(1)
       : "Domestic",
@@ -138,10 +137,6 @@ function buildFullPayload(opts = {}) {
     transaction_charges: opts.transaction_charges || 0,
     total_discount: opts.total_discount || 0,
     sub_total: opts.sub_total || 0,
-    length,
-    breadth,
-    height,
-    weight: actualWeight,
     ewaybill_no: opts.ewaybill_no || undefined,
     reseller_name: opts.reseller_name || undefined,
     company_name: opts.company_name || undefined,
@@ -165,10 +160,7 @@ async function calculateRates(opts = {}) {
 
   try {
     const res = await axios.post(`${API_BASE}/courier/serviceability/`, payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       timeout: 20000,
     });
 
@@ -303,17 +295,25 @@ async function updateOrder(orderPayload) {
 }
 
 /**
- * Cancel an order in Shiprocket
+ * Cancel order(s) in Shiprocket
  */
-async function cancelOrder(shiprocketOrderId) {
-  if (!shiprocketOrderId) throw new Error("shiprocket_order_id is required for cancellation");
+async function cancelOrder(shiprocketOrderIds) {
+  if (!shiprocketOrderIds) throw new Error("shiprocket_order_ids are required for cancellation");
+
+  const ids = Array.isArray(shiprocketOrderIds) ? shiprocketOrderIds : [shiprocketOrderIds];
   const token = await getToken();
+
   try {
     const res = await axios.post(
       `${API_BASE}/orders/cancel`,
-      { order_id: shiprocketOrderId },
-      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+      { ids },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
     );
+
+    if (!res.data.success) {
+      throw new Error("Shiprocket API failed to cancel order: " + JSON.stringify(res.data));
+    }
+
     return res.data;
   } catch (err) {
     const remote = err.response?.data || err.message;
