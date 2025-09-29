@@ -3,6 +3,7 @@ import express from "express";
 import db from "./db.js";
 import { auth } from "./auth.js";
 import PDFDocument from "pdfkit";
+import { cancelOrder as cancelShiprocketOrder } from "./shiprocket.js"; // we'll create this
 
 const router = express.Router();
 
@@ -218,28 +219,57 @@ router.get("/", auth, (req, res) => {
 /**
  * PUT /api/user/orders/:id/cancel
  */
-router.put("/:id/cancel", auth, (req, res) => {
+router.put("/:id/cancel", auth, async (req, res) => {
   const userId = req.user.id;
   const orderId = req.params.id;
 
-  const sql = `
-    UPDATE orders
-    SET status = 'cancelled'
-    WHERE id = ? AND user_id = ? AND LOWER(status) IN ('pending','confirmed')
-  `;
+  try {
+    // 1️⃣ Get the order from DB
+    const order = await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT * FROM orders WHERE id = ? AND user_id = ?`,
+        [orderId, userId],
+        (err, row) => (err ? reject(err) : resolve(row))
+      );
+    });
 
-  db.run(sql, [orderId, userId], function (err) {
-    if (err) {
-      console.error("Error cancelling order:", err);
-      return res.status(500).json({ message: "Failed to cancel order" });
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
     }
-    if (this.changes === 0) {
+    if (!["pending", "confirmed"].includes(order.status.toLowerCase())) {
       return res.status(400).json({ message: "Order cannot be cancelled" });
     }
-    res.json({ message: "Order cancelled successfully" });
-  });
-});
 
+    // 2️⃣ Cancel in Shiprocket if shiprocket_order_id exists
+    if (order.shiprocket_order_id) {
+      try {
+        await cancelShiprocketOrder(order.shiprocket_order_id);
+      } catch (err) {
+        console.error("Shiprocket cancellation failed:", err.message);
+        // continue, we still cancel locally
+      }
+    }
+
+    // 3️⃣ Update status in DB
+    await new Promise((resolve, reject) => {
+      db.run(
+        `UPDATE orders
+         SET status = 'cancelled'
+         WHERE id = ? AND user_id = ?`,
+        [orderId, userId],
+        function (err) {
+          if (err) reject(err);
+          else resolve(this);
+        }
+      );
+    });
+
+    res.json({ message: "Order cancelled successfully" });
+  } catch (err) {
+    console.error("Error cancelling order:", err.message);
+    res.status(500).json({ message: "Failed to cancel order", details: err.message });
+  }
+});
 /**
  * POST /api/user/orders/:id/reorder
  */
@@ -401,6 +431,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
