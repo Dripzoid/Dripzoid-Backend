@@ -4,6 +4,7 @@ dotenv.config();
 
 import express from "express";
 import sqlite3 from "sqlite3";
+import multer from "multer";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 import cors from "cors";
@@ -1008,6 +1009,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
