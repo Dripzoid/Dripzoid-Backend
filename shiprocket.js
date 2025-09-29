@@ -37,7 +37,6 @@ async function getToken() {
  * Check courier serviceability.
  *
  * Required: pickup_postcode, delivery_postcode, cod, weight
- * Optional: length, breadth, height, declared_value, mode, is_return, qc_check
  */
 async function checkServiceability(destPincode, opts = {}) {
   // Ensure pincodes are integers
@@ -50,23 +49,28 @@ async function checkServiceability(destPincode, opts = {}) {
 
   // Normalize params
   const order_id = opts.order_id ?? null;
+
+  // cod: must be 0 or 1 integer
   const cod =
     opts.cod === undefined
       ? 0
-      : opts.cod === true || String(opts.cod) === "1" || String(opts.cod).toLowerCase() === "true"
+      : opts.cod === true ||
+        String(opts.cod) === "1" ||
+        String(opts.cod).toLowerCase() === "true"
       ? 1
       : 0;
-  const weight =
-    opts.weight === undefined || opts.weight === "" ? "1" : String(opts.weight);
 
-  // Validate conditional requirement
-  if (!order_id && (cod === undefined || !weight || weight === "")) {
-    throw new Error("Either order_id OR both cod and weight must be provided");
+  // weight: must be number (float), default 1.0
+  const weight =
+    opts.weight === undefined || opts.weight === "" ? 1.0 : parseFloat(opts.weight);
+
+  if (!order_id && (weight <= 0 || isNaN(weight))) {
+    throw new Error("Valid weight is required when order_id is not provided");
   }
 
   const token = await getToken();
 
-  // Build params: only include what’s needed
+  // Build params
   let params;
   if (order_id) {
     params = { order_id, pickup_postcode, delivery_postcode };
@@ -80,30 +84,45 @@ async function checkServiceability(destPincode, opts = {}) {
     if (opts.length) params.length = parseInt(opts.length, 10);
     if (opts.breadth) params.breadth = parseInt(opts.breadth, 10);
     if (opts.height) params.height = parseInt(opts.height, 10);
-    if (opts.declared_value) params.declared_value = parseInt(opts.declared_value, 10);
+    if (opts.declared_value)
+      params.declared_value = parseInt(opts.declared_value, 10);
     if (opts.mode) params.mode = opts.mode;
-    if (opts.is_return !== undefined) params.is_return = Number(opts.is_return) ? 1 : 0;
-    if (opts.qc_check !== undefined) params.qc_check = Number(opts.qc_check) ? 1 : 0;
+    if (opts.is_return !== undefined)
+      params.is_return = Number(opts.is_return) ? 1 : 0;
+    if (opts.qc_check !== undefined)
+      params.qc_check = Number(opts.qc_check) ? 1 : 0;
   }
 
   try {
     const res = await axios.get(`${API_BASE}/courier/serviceability/`, {
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
       params,
       timeout: 15000,
     });
 
-    // Inspect response
     if (process.env.DEBUG_SHIPROCKET === "1") {
-      console.debug("Shiprocket raw response:", JSON.stringify(res.data, null, 2));
+      console.debug(
+        "Shiprocket raw response:",
+        JSON.stringify(res.data, null, 2)
+      );
     }
 
-    const available = res.data?.data?.available_couriers ?? res.data?.data ?? [];
-    const arr = Array.isArray(available)
-      ? available
-      : available.available_couriers ?? available.couriers ?? available.data ?? [];
+    // Response parsing: couriers can come in different shapes
+    let couriers = [];
+    if (Array.isArray(res.data?.data)) {
+      couriers = res.data.data;
+    } else if (Array.isArray(res.data?.data?.available_couriers)) {
+      couriers = res.data.data.available_couriers;
+    } else if (Array.isArray(res.data?.available_couriers)) {
+      couriers = res.data.available_couriers;
+    } else if (Array.isArray(res.data)) {
+      couriers = res.data;
+    }
 
-    return (Array.isArray(arr) ? arr : []).map((c) => ({
+    return couriers.map((c) => ({
       courier_id: c.courier_id ?? c.id ?? null,
       courier_name: c.courier_name ?? c.name ?? null,
       rate: c.rate ?? c.shipping_charges ?? c.amount ?? null,
@@ -114,7 +133,9 @@ async function checkServiceability(destPincode, opts = {}) {
   } catch (err) {
     const remote = err.response?.data || err.message;
     console.error("Shiprocket Serviceability Error:", remote);
-    throw new Error("Failed to check serviceability: " + (remote?.message || remote));
+    throw new Error(
+      "Failed to check serviceability: " + (remote?.message || remote)
+    );
   }
 }
 
