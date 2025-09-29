@@ -946,22 +946,52 @@ app.get("/api/admin/data-export", auth, (req, res) => {
 
 
 // --- DB upload route ---
+import multer from "multer";
+import fs from "fs";
+import path from "path";
+
 const upload = multer({ dest: "/tmp/" });
-app.post("/api/upload-db", upload.single("dbfile"), (req,res)=>{
-  try{
+
+app.post("/api/upload-db", upload.single("dbfile"), (req, res) => {
+  try {
     const tokenUpload = req.headers["x-upload-token"];
     console.log("Received token:", tokenUpload);
-console.log("Expected token:", process.env.UPLOAD_SECRET);
+    console.log("Expected token:", process.env.UPLOAD_SECRET);
 
-    if(!tokenUpload || tokenUpload!==process.env.UPLOAD_SECRET) return res.status(403).json({message:"Unauthorized"});
-    if(!req.file) return res.status(400).json({message:"No file uploaded"});
+    if (!tokenUpload || tokenUpload !== process.env.UPLOAD_SECRET) {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded" });
+    }
+
     const tempPath = req.file.path;
-    if(path.extname(req.file.originalname)!==".db"){ fs.unlinkSync(tempPath); return res.status(400).json({message:"Only .db allowed"}); }
-    if(fs.existsSync(DB_PATH)) fs.copyFileSync(DB_PATH, DB_PATH+".backup");
-    fs.renameSync(tempPath, DB_PATH);
-    return res.json({message:"DB replaced successfully"});
-  }catch(err){ console.error(err); res.status(500).json({message:"Failed to replace DB"}); }
+
+    // Validate file extension
+    if (path.extname(req.file.originalname) !== ".db") {
+      fs.unlinkSync(tempPath);
+      return res.status(400).json({ message: "Only .db files are allowed" });
+    }
+
+    // Backup existing DB if it exists
+    if (fs.existsSync(DB_PATH)) {
+      fs.copyFileSync(DB_PATH, DB_PATH + ".backup");
+    }
+
+    // Copy uploaded file to DB_PATH (works across devices)
+    fs.copyFileSync(tempPath, DB_PATH);
+
+    // Remove temp uploaded file
+    fs.unlinkSync(tempPath);
+
+    return res.json({ message: "DB replaced successfully" });
+  } catch (err) {
+    console.error("DB upload failed:", err);
+    return res.status(500).json({ message: "Failed to replace DB" });
+  }
 });
+
 
 
 
@@ -1018,6 +1048,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
