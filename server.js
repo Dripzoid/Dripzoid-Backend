@@ -944,6 +944,9 @@ const upload = multer({ dest: "/tmp/" });
 app.post("/api/upload-db", upload.single("dbfile"), (req,res)=>{
   try{
     const tokenUpload = req.headers["x-upload-token"];
+    console.log("Received token:", tokenUpload);
+console.log("Expected token:", process.env.UPLOAD_SECRET);
+
     if(!tokenUpload || tokenUpload!==process.env.UPLOAD_SECRET) return res.status(403).json({message:"Unauthorized"});
     if(!req.file) return res.status(400).json({message:"No file uploaded"});
     const tempPath = req.file.path;
@@ -1009,6 +1012,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
