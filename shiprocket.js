@@ -34,7 +34,7 @@ async function getToken() {
 }
 
 /**
- * Helper: compute volumetric weight and chargeable/applicable weight
+ * Compute weights (actual, volumetric, chargeable).
  */
 function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divisor = 5000 }) {
   const actualWeight = parseFloat(weight) || 0;
@@ -68,13 +68,14 @@ function buildFullPayload(opts = {}) {
 
   if (!delivery_postcode) throw new Error("delivery_postcode is required");
 
-  const cod = opts.cod === undefined
-    ? 0
-    : opts.cod === true || String(opts.cod) === "1" || String(opts.cod).toLowerCase() === "true"
-    ? 1
-    : 0;
+  const cod =
+    opts.cod === undefined
+      ? 0
+      : opts.cod === true || String(opts.cod) === "1" || String(opts.cod).toLowerCase() === "true"
+      ? 1
+      : 0;
 
-  const weight = (opts.weight === undefined || opts.weight === "") ? 1.0 : parseFloat(opts.weight);
+  const weight = opts.weight === undefined || opts.weight === "" ? 1.0 : parseFloat(opts.weight);
 
   const length = opts.length ? parseFloat(opts.length) : undefined;
   const breadth = opts.breadth ? parseFloat(opts.breadth) : undefined;
@@ -83,7 +84,11 @@ function buildFullPayload(opts = {}) {
   const volumetric_divisor = opts.volumetric_divisor || (opts.aramex ? 6000 : 5000);
 
   const { volumetricWeight, applicableWeight, actualWeight } = computeWeights({
-    weight, length, breadth, height, volumetric_divisor
+    weight,
+    length,
+    breadth,
+    height,
+    volumetric_divisor,
   });
 
   const payload = {
@@ -237,5 +242,62 @@ async function checkServiceability(destPincode, opts = {}) {
   }
 }
 
-export { getToken, checkServiceability, calculateRates, buildFullPayload };
-export default { getToken, checkServiceability, calculateRates, buildFullPayload };
+/**
+ * Create an order
+ */
+async function createOrder(orderPayload) {
+  const token = await getToken();
+  try {
+    const res = await axios.post(`${API_BASE}/orders/create/adhoc`, orderPayload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 20000,
+    });
+    return res.data;
+  } catch (err) {
+    const remote = err.response?.data || err.message;
+    console.error("Shiprocket createOrder Error:", remote);
+    throw new Error("Failed to create order: " + (remote?.message || remote));
+  }
+}
+
+/**
+ * Update an order
+ */
+async function updateOrder(orderPayload) {
+  const token = await getToken();
+  try {
+    const res = await axios.post(`${API_BASE}/orders/update/adhoc`, orderPayload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 20000,
+    });
+    return res.data;
+  } catch (err) {
+    const remote = err.response?.data || err.message;
+    console.error("Shiprocket updateOrder Error:", remote);
+    throw new Error("Failed to update order: " + (remote?.message || remote));
+  }
+}
+
+export {
+  getToken,
+  checkServiceability,
+  calculateRates,
+  buildFullPayload,
+  createOrder,
+  updateOrder,
+};
+
+export default {
+  getToken,
+  checkServiceability,
+  calculateRates,
+  buildFullPayload,
+  createOrder,
+  updateOrder,
+};
