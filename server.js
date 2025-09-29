@@ -938,6 +938,23 @@ app.get("/api/admin/data-export", auth, (req, res) => {
 });
 
 
+// --- DB upload route ---
+const upload = multer({ dest: "/tmp/" });
+app.post("/api/upload-db", upload.single("dbfile"), (req,res)=>{
+  try{
+    const token = req.headers["x-upload-token"];
+    if(!token || token!==UPLOAD_SECRET) return res.status(403).json({message:"Unauthorized"});
+    if(!req.file) return res.status(400).json({message:"No file uploaded"});
+    const tempPath = req.file.path;
+    if(path.extname(req.file.originalname)!==".db"){ fs.unlinkSync(tempPath); return res.status(400).json({message:"Only .db allowed"}); }
+    if(fs.existsSync(DB_PATH)) fs.copyFileSync(DB_PATH, DB_PATH+".backup");
+    fs.renameSync(tempPath, DB_PATH);
+    return res.json({message:"DB replaced successfully"});
+  }catch(err){ console.error(err); res.status(500).json({message:"Failed to replace DB"}); }
+});
+
+
+
 // -------------------- Mount Other Routes --------------------
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/products", productsRouter);
@@ -991,6 +1008,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
