@@ -35,8 +35,6 @@ async function getToken() {
 
 /**
  * Helper: compute volumetric weight and chargeable/applicable weight
- * - volumetric divisor default 5000 (cm -> kg) (Aramex uses 6000)
- * - minimum chargeable weight fallback is 0.5kg
  */
 function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divisor = 5000 }) {
   const actualWeight = parseFloat(weight) || 0;
@@ -52,7 +50,7 @@ function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divi
   }
 
   const minimum = 0.5;
-  const chargeable = Math.max(actualWeight || 0, volumetricWeight || 0, minimum);
+  const chargeable = Math.max(actualWeight, volumetricWeight, minimum);
 
   return {
     actualWeight,
@@ -62,18 +60,13 @@ function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divi
 }
 
 /**
- * Build full payload like a Shipping Rate Calculator form would send.
- * Accepts many of the calculator fields (names matched to UI expectations):
- * {
- *   pickup_postcode, delivery_postcode, weight, length, breadth, height,
- *   cod (boolean or 0/1), payment_mode ("Prepaid"|"COD"), shipment_value,
- *   is_dangerous, mode ("Air"|"Surface"), shipment_type ("Domestic"|"International"),
- *   volumetric_divisor (5000 or 6000), order_id, qc_check, is_return
- * }
+ * Build full payload like Shipping Rate Calculator form
  */
 function buildFullPayload(opts = {}) {
   const pickup_postcode = parseInt(opts.pickup_postcode || WAREHOUSE_PINCODE, 10);
   const delivery_postcode = parseInt(opts.delivery_postcode || opts.destPincode || 0, 10);
+
+  if (!delivery_postcode) throw new Error("delivery_postcode is required");
 
   const cod = opts.cod === undefined
     ? 0
@@ -94,61 +87,41 @@ function buildFullPayload(opts = {}) {
   });
 
   const payload = {
-    // required
     pickup_postcode,
     delivery_postcode,
-
-    // weights
     weight: actualWeight,
     volumetric_weight: volumetricWeight,
     chargeable_weight: applicableWeight,
-
-    // parcel dims (optional)
-    length: length || undefined,
-    breadth: breadth || undefined,
-    height: height || undefined,
-
-    // money & flags
+    length,
+    breadth,
+    height,
     cod,
     payment_mode: opts.payment_mode || (cod ? "COD" : "Prepaid"),
     declared_value: opts.shipment_value ? parseFloat(opts.shipment_value) : undefined,
     is_dangerous: opts.is_dangerous ? 1 : 0,
-
-    // routing / preference
-    mode: opts.mode || undefined, // "Air" or "Surface"
-    shipment_type: opts.shipment_type || opts.type || "domestic",
-
-    // optional merchant fields
+    mode: opts.mode || undefined,
+    shipment_type: opts.shipment_type
+      ? opts.shipment_type.charAt(0).toUpperCase() + opts.shipment_type.slice(1)
+      : "Domestic",
     order_id: opts.order_id || undefined,
     is_return: opts.is_return !== undefined ? Number(opts.is_return) : undefined,
     qc_check: opts.qc_check !== undefined ? Number(opts.qc_check) : undefined,
-
-    // meta
     volumetric_divisor,
   };
 
-  // remove undefined values (clean payload)
   Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
 
   return payload;
 }
 
 /**
- * calculateRates: send the FULL payload to Shiprocket's serviceability endpoint
- * (useful when you want rate breakdowns just like the Shipping Rate Calculator UI).
- * Returns: array of couriers with normalized fields + meta (chargeable/applicable weight etc)
+ * Send full payload to Shiprocket and return normalized courier rates
  */
 async function calculateRates(opts = {}) {
-  if (!opts.delivery_postcode && !opts.destPincode && !opts.delivery_pincode) {
-    throw new Error("delivery_postcode is required");
-  }
-
   const token = await getToken();
   const payload = buildFullPayload(opts);
 
   try {
-    // Use POST to send a full payload (some integrations accept GET with params;
-    // POST is safer when sending richer JSON payloads).
     const res = await axios.post(`${API_BASE}/courier/serviceability/`, payload, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -163,25 +136,23 @@ async function calculateRates(opts = {}) {
     }
 
     let couriers = [];
-    if (Array.isArray(res.data?.data)) {
-      couriers = res.data.data;
+    if (Array.isArray(res.data?.data?.available_courier_companies)) {
+      couriers = res.data.data.available_courier_companies;
     } else if (Array.isArray(res.data?.data?.available_couriers)) {
       couriers = res.data.data.available_couriers;
-    } else if (Array.isArray(res.data?.available_couriers)) {
-      couriers = res.data.available_couriers;
     } else if (Array.isArray(res.data)) {
       couriers = res.data;
     }
 
     return couriers.map((c) => ({
-      courier_id: c.courier_id ?? c.id ?? null,
+      courier_id: c.courier_company_id ?? c.courier_id ?? c.id ?? null,
       courier_name: c.courier_name ?? c.name ?? null,
-      rate: c.rate ?? c.shipping_charges ?? c.amount ?? c.charge ?? null,
+      rate: c.rate ?? c.shipping_charges ?? c.amount ?? c.freight_charge ?? null,
       cod: c.cod ?? payload.cod ?? 0,
       etd: c.etd ?? c.estimated_delivery ?? c.transit_time ?? null,
-      chargeable_weight: payload.chargeable_weight ?? payload.chargeable_weight,
-      volumetric_weight: payload.volumetric_weight ?? undefined,
-      applicable_weight: payload.chargeable_weight ?? undefined,
+      chargeable_weight: payload.chargeable_weight,
+      volumetric_weight: payload.volumetric_weight,
+      applicable_weight: payload.chargeable_weight,
       raw: c,
     }));
   } catch (err) {
@@ -192,18 +163,14 @@ async function calculateRates(opts = {}) {
 }
 
 /**
- * Backwards-compatible checkServiceability: if `opts.full_payload` is truthy it will
- * call calculateRates (sending the full payload) otherwise it will behave like earlier
- * lightweight GET-based serviceability check.
+ * Check serviceability (lightweight GET or full payload POST)
  */
 async function checkServiceability(destPincode, opts = {}) {
   if (opts.full_payload) {
-    // move destPincode into opts for convenience
     opts.delivery_postcode = opts.delivery_postcode || destPincode;
     return await calculateRates(opts);
   }
 
-  // Ensure pincodes are integers
   const pickup_postcode = parseInt(WAREHOUSE_PINCODE, 10);
   const delivery_postcode = parseInt(destPincode, 10);
 
@@ -211,48 +178,25 @@ async function checkServiceability(destPincode, opts = {}) {
     throw new Error("destination pincode required and must be a valid integer");
   }
 
-  // Normalize params
-  const order_id = opts.order_id ?? null;
-
-  // cod: must be 0 or 1 integer
   const cod =
     opts.cod === undefined
       ? 0
-      : opts.cod === true ||
-        String(opts.cod) === "1" ||
-        String(opts.cod).toLowerCase() === "true"
+      : opts.cod === true || String(opts.cod) === "1" || String(opts.cod).toLowerCase() === "true"
       ? 1
       : 0;
 
-  // weight: must be number (float), default 1.0
-  const weight =
-    opts.weight === undefined || opts.weight === "" ? 1.0 : parseFloat(opts.weight);
-
-  if (!order_id && (weight <= 0 || isNaN(weight))) {
-    throw new Error("Valid weight is required when order_id is not provided");
-  }
+  const weight = opts.weight === undefined || opts.weight === "" ? 1.0 : parseFloat(opts.weight);
 
   const token = await getToken();
 
-  // Build params
-  let params;
-  if (order_id) {
-    params = { order_id, pickup_postcode, delivery_postcode };
-  } else {
-    params = {
-      pickup_postcode,
-      delivery_postcode,
-      cod,
-      weight,
-    };
-    if (opts.length) params.length = parseInt(opts.length, 10);
-    if (opts.breadth) params.breadth = parseInt(opts.breadth, 10);
-    if (opts.height) params.height = parseInt(opts.height, 10);
-    if (opts.declared_value) params.declared_value = parseInt(opts.declared_value, 10);
-    if (opts.mode) params.mode = opts.mode;
-    if (opts.is_return !== undefined) params.is_return = Number(opts.is_return) ? 1 : 0;
-    if (opts.qc_check !== undefined) params.qc_check = Number(opts.qc_check) ? 1 : 0;
-  }
+  let params = { pickup_postcode, delivery_postcode, cod, weight };
+  if (opts.length) params.length = parseInt(opts.length, 10);
+  if (opts.breadth) params.breadth = parseInt(opts.breadth, 10);
+  if (opts.height) params.height = parseInt(opts.height, 10);
+  if (opts.declared_value) params.declared_value = parseInt(opts.declared_value, 10);
+  if (opts.mode) params.mode = opts.mode;
+  if (opts.is_return !== undefined) params.is_return = Number(opts.is_return) ? 1 : 0;
+  if (opts.qc_check !== undefined) params.qc_check = Number(opts.qc_check) ? 1 : 0;
 
   try {
     const res = await axios.get(`${API_BASE}/courier/serviceability/`, {
@@ -265,26 +209,21 @@ async function checkServiceability(destPincode, opts = {}) {
     });
 
     if (process.env.DEBUG_SHIPROCKET === "1") {
-      console.debug(
-        "Shiprocket raw response:",
-        JSON.stringify(res.data, null, 2)
-      );
+      console.debug("Shiprocket lightweight raw response:", JSON.stringify(res.data, null, 2));
+      console.debug("GET params:", JSON.stringify(params, null, 2));
     }
 
-    // Response parsing: couriers can come in different shapes
     let couriers = [];
-    if (Array.isArray(res.data?.data)) {
-      couriers = res.data.data;
+    if (Array.isArray(res.data?.data?.available_courier_companies)) {
+      couriers = res.data.data.available_courier_companies;
     } else if (Array.isArray(res.data?.data?.available_couriers)) {
       couriers = res.data.data.available_couriers;
-    } else if (Array.isArray(res.data?.available_couriers)) {
-      couriers = res.data.available_couriers;
     } else if (Array.isArray(res.data)) {
       couriers = res.data;
     }
 
     return couriers.map((c) => ({
-      courier_id: c.courier_id ?? c.id ?? null,
+      courier_id: c.courier_company_id ?? c.courier_id ?? c.id ?? null,
       courier_name: c.courier_name ?? c.name ?? null,
       rate: c.rate ?? c.shipping_charges ?? c.amount ?? null,
       cod: c.cod ?? cod,
@@ -294,9 +233,7 @@ async function checkServiceability(destPincode, opts = {}) {
   } catch (err) {
     const remote = err.response?.data || err.message;
     console.error("Shiprocket Serviceability Error:", remote);
-    throw new Error(
-      "Failed to check serviceability: " + (remote?.message || remote)
-    );
+    throw new Error("Failed to check serviceability: " + (remote?.message || remote));
   }
 }
 
