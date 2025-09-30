@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import Razorpay from "razorpay";
 import db from "./db.js";
+import { createOrder as createShiprocketOrder } from "./shiprocket.js"; // ⬅ import helper
 
 const router = express.Router();
 
@@ -61,6 +62,7 @@ db.run(
     razorpay_order_id TEXT,
     razorpay_amount INTEGER,
     razorpay_payment_id TEXT,
+    shiprocket_order_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`
@@ -74,6 +76,8 @@ db.run(
     quantity INTEGER NOT NULL DEFAULT 1,
     unit_price REAL NOT NULL DEFAULT 0,
     price REAL NOT NULL DEFAULT 0,
+    selectedColor TEXT,
+    selectedSize TEXT,
     FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
     FOREIGN KEY(product_id) REFERENCES products(id)
   )`
@@ -89,7 +93,7 @@ db.run(
   )`
 );
 
-// ---------------- CREATE RAZORPAY ORDER ----------------
+// ---------------- CREATE RAZORPAY + SHIPROCKET ORDER ----------------
 router.post("/razorpay/create-order", auth, async (req, res) => {
   try {
     const { items, shipping, totalAmount } = req.body;
@@ -105,7 +109,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
 
     const amountPaise = Math.round(totalAmtNumber * 100);
 
-    // 1️⃣ Insert order
+    // 1️⃣ Insert order into DB
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO orders (user_id, shipping_json, total_amount, status) 
@@ -119,31 +123,29 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     });
 
     // 2️⃣ Insert items into order_items
-// 2️⃣ Insert items into order_items
-for (const item of items) {
-  const unitPrice = Number(item.unit_price || item.price || 0);
-  const quantity = Number(item.quantity || 1);
-  await new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO order_items (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        orderResult.id,
-        item.product_id,
-        quantity,
-        unitPrice,
-        unitPrice * quantity,
-        item.selectedColor ?? null,
-        item.selectedSize ?? null,
-      ],
-      function (err) {
-        if (err) return reject(err);
-        resolve();
-      }
-    );
-  });
-}
-
+    for (const item of items) {
+      const unitPrice = Number(item.unit_price || item.price || 0);
+      const quantity = Number(item.quantity || 1);
+      await new Promise((resolve, reject) => {
+        db.run(
+          `INSERT INTO order_items (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize) 
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            orderResult.id,
+            item.product_id,
+            quantity,
+            unitPrice,
+            unitPrice * quantity,
+            item.selectedColor ?? null,
+            item.selectedSize ?? null,
+          ],
+          function (err) {
+            if (err) return reject(err);
+            resolve();
+          }
+        );
+      });
+    }
 
     // 3️⃣ Create Razorpay order
     const razorOrder = await razorpay.orders.create({
@@ -153,22 +155,63 @@ for (const item of items) {
       notes: { internalOrderId: orderResult.id.toString() },
     });
 
-    // 4️⃣ Update order with Razorpay info
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE orders SET razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-        [razorOrder.id, razorOrder.amount, orderResult.id],
-        function (err) {
-          if (err) return reject(err);
-          resolve();
-        }
-      );
-    });
+    // 4️⃣ Build Shiprocket payload
+    const shiprocketPayload = {
+      order_id: `ORD-${orderResult.id}`,
+      order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
+      pickup_location: "warehouse",
+      channel_id: "",
+      comment: "Auto-created via API",
+      billing_customer_name: shipping?.name || "Customer",
+      billing_last_name: "",
+      billing_address: shipping?.address || "",
+      billing_city: shipping?.city || "",
+      billing_pincode: shipping?.pincode || "",
+      billing_state: shipping?.state || "",
+      billing_country: "India",
+      billing_email: shipping?.email || "",
+      billing_phone: shipping?.phone || "",
+      shipping_is_billing: true,
+      order_items: items.map((i) => ({
+        name: i.name || `Product ${i.product_id}`,
+        sku: i.sku || `SKU-${i.product_id}`,
+        units: i.quantity,
+        selling_price: i.unit_price || i.price || 0,
+      })),
+      payment_method: "Prepaid",
+      sub_total: totalAmtNumber,
+      total_discount: 0,
+      length: 10,
+      breadth: 10,
+      height: 10,
+      weight: 0.5,
+    };
 
-    // 5️⃣ Insert user activity (Placed order)
+    // 5️⃣ Create Shiprocket order
+    let shiprocketOrderId = null;
+    try {
+      const shipRes = await createShiprocketOrder(shiprocketPayload);
+      shiprocketOrderId = shipRes?.order_id || null;
+
+      // Save shiprocket_order_id in DB
+      await new Promise((resolve, reject) => {
+        db.run(
+          `UPDATE orders SET shiprocket_order_id = ?, razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [shiprocketOrderId, razorOrder.id, razorOrder.amount, orderResult.id],
+          function (err) {
+            if (err) return reject(err);
+            resolve();
+          }
+        );
+      });
+    } catch (shipErr) {
+      console.error("Shiprocket createOrder Error:", shipErr);
+    }
+
+    // 6️⃣ Insert user activity (Placed order)
     await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
+        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)` ,
         [req.user.id, `Placed order #${orderResult.id}`],
         function (err) {
           if (err) return reject(err);
@@ -182,10 +225,11 @@ for (const item of items) {
       amount: razorOrder.amount,
       currency: razorOrder.currency,
       internalOrderId: orderResult.id,
+      shiprocketOrderId,
     });
   } catch (err) {
     console.error("Razorpay create-order error:", err);
-    res.status(500).json({ error: "Failed to create Razorpay order" });
+    res.status(500).json({ error: "Failed to create order" });
   }
 });
 
@@ -225,7 +269,7 @@ router.post("/razorpay/verify", auth, async (req, res) => {
     // Insert user activity (Payment successful)
     await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
+        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)` ,
         [req.user.id, `Payment successful for order #${internalOrderId}`],
         function (err) {
           if (err) return reject(err);
@@ -242,5 +286,3 @@ router.post("/razorpay/verify", auth, async (req, res) => {
 });
 
 export default router;
-
-
