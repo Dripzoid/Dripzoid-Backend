@@ -198,6 +198,21 @@ router.get("/", authenticateToken, (req, res) => {
   });
 });
 
+/**
+ * DELETE /api/cart
+ * Clears all cart items for the logged-in user
+ */
+router.delete("/", authenticateToken, (req, res) => {
+  db.run(
+    `DELETE FROM cart_items WHERE user_id = ?`,
+    [req.user.id],
+    function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ cleared: this.changes }); // number of rows deleted
+    }
+  );
+});
+
 // -------------------- Get cart items for a specific user --------------------
 router.get("/:id", authenticateToken, (req, res) => {
   try {
@@ -299,6 +314,7 @@ router.delete("/:id", authenticateToken, (req, res) => {
 });
 
 export default router;
+
 
 
 
