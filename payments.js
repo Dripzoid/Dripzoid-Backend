@@ -168,36 +168,43 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     });
 
     // --- Build Shiprocket payload ---
-    const shiprocketPayload = {
-      order_id: `ORD-${orderResult.id}`,
-      order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
-      pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
-      channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
-      billing_customer_name: shipping?.name || req.user?.name || "Customer",
-      billing_last_name: "",
-      billing_address: shipping?.line1 || "",
-      billing_address_2: shipping?.line2 || "",
-      billing_city: shipping?.city || "",
-      billing_pincode: shipping?.pincode || "",
-      billing_state: shipping?.state || "",
-      billing_country: shipping?.country || "India",
-      billing_email: shipping?.email || req.user?.email || "noreply@example.com",
-      billing_phone: shipping?.phone || "",
-      shipping_is_billing: true,
-      order_items: items.map((i) => ({
-        name: i.name || `Product ${i.product_id}`,
-        sku: i.sku || `SKU-${i.product_id}`,
-        units: i.quantity,
-        selling_price: i.unit_price || i.price || 0,
-      })),
-      payment_method: "Prepaid",
-      sub_total: totalAmtNumber,
-      total_discount: 0,
-      length: 10,
-      breadth: 10,
-      height: 10,
-      weight: 0.5,
-    };
+const address = shipping || {};
+
+const shiprocketPayload = {
+  order_id: `ORD-${orderResult.id}`,
+  order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
+  pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
+  channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
+
+  billing_customer_name: address.name || req.user?.name || "Customer",
+  billing_last_name: "",
+  billing_address: address.line1 || address.address || "N/A",   // fallback
+  billing_address_2: address.line2 || "",
+  billing_city: address.city || "N/A",
+  billing_pincode: address.pincode || "000000",                 // must be 6-digit
+  billing_state: address.state || "N/A",
+  billing_country: address.country || "India",
+  billing_email: address.email || req.user?.email || "noreply@example.com",
+  billing_phone: address.phone || "0000000000",                // fallback
+
+  shipping_is_billing: true,
+  order_items: items.map((i) => ({
+    name: i.name || `Product ${i.product_id}`,
+    sku: i.sku || `SKU-${i.product_id}`,
+    units: i.quantity,
+    selling_price: i.unit_price || i.price || 0,
+  })),
+  payment_method: "Prepaid",
+  sub_total: totalAmtNumber,
+  total_discount: 0,
+  length: 10,
+  breadth: 10,
+  height: 10,
+  weight: 0.5,
+};
+
+// Optional: log payload for debugging
+console.log("Shiprocket Payload:", shiprocketPayload);
 
     // --- Create Shiprocket order ---
     let shiprocketOrderId = null;
@@ -303,3 +310,4 @@ router.post("/razorpay/verify", auth, async (req, res) => {
 });
 
 export default router;
+
