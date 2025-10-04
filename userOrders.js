@@ -215,6 +215,138 @@ router.get("/", auth, (req, res) => {
   }
 });
 
+/**
+ * GET /api/user/orders/:id
+ * Fetch a single order (with items and address)
+ */
+router.get("/:id", auth, async (req, res) => {
+  const userId = req.user.id;
+  const orderId = req.params.id;
+
+  try {
+    // 1️⃣ Fetch the order with user and address info
+    const order = await new Promise((resolve, reject) => {
+      db.get(
+        `
+        SELECT 
+          o.*,
+          u.name AS user_name,
+          a.id AS addr_id,
+          a.label AS addr_label,
+          a.line1 AS addr_line1,
+          a.line2 AS addr_line2,
+          a.city AS addr_city,
+          a.state AS addr_state,
+          a.pincode AS addr_pincode,
+          a.country AS addr_country,
+          a.phone AS addr_phone
+        FROM orders o
+        LEFT JOIN users u ON o.user_id = u.id
+        LEFT JOIN addresses a ON o.address_id = a.id
+        WHERE o.id = ? AND o.user_id = ?
+      `,
+        [orderId, userId],
+        (err, row) => (err ? reject(err) : resolve(row))
+      );
+    });
+
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // 2️⃣ Parse or fallback shipping address
+    let shippingAddress = null;
+    if (order.addr_id) {
+      shippingAddress = {
+        id: order.addr_id,
+        label: order.addr_label,
+        line1: order.addr_line1,
+        line2: order.addr_line2,
+        city: order.addr_city,
+        state: order.addr_state,
+        pincode: order.addr_pincode,
+        country: order.addr_country,
+        phone: order.addr_phone,
+      };
+    } else {
+      const rawCandidates = [order.shipping_json, order.shipping_address];
+      for (const raw of rawCandidates) {
+        if (!raw && raw !== "") continue;
+        try {
+          const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+          if (parsed && typeof parsed === "object") {
+            shippingAddress = {
+              id: parsed.id ?? null,
+              label: parsed.label ?? parsed.title ?? parsed.name ?? null,
+              line1: parsed.line1 ?? parsed.address_line1 ?? parsed.address1 ?? parsed.address ?? null,
+              line2: parsed.line2 ?? parsed.address_line2 ?? parsed.address2 ?? null,
+              city: parsed.city ?? parsed.town ?? null,
+              state: parsed.state ?? null,
+              pincode: parsed.pincode ?? parsed.postcode ?? parsed.zip ?? null,
+              country: parsed.country ?? null,
+              phone: parsed.phone ?? parsed.mobile ?? null,
+            };
+            break;
+          }
+        } catch {
+          const trimmed = raw.toString().trim();
+          if (trimmed) {
+            shippingAddress = { id: null, label: null, line1: trimmed };
+            break;
+          }
+        }
+      }
+    }
+
+    // 3️⃣ Fetch order items
+    const items = await new Promise((resolve, reject) => {
+      db.all(
+        `
+        SELECT 
+          oi.order_id,
+          oi.quantity,
+          oi.price,
+          p.id AS product_id,
+          p.name,
+          p.images,
+          oi.selectedColor,
+          oi.selectedSize
+        FROM order_items oi
+        JOIN products p ON oi.product_id = p.id
+        WHERE oi.order_id = ?
+      `,
+        [orderId],
+        (err, rows) => (err ? reject(err) : resolve(rows))
+      );
+    });
+
+    // 4️⃣ Format response
+    const formatted = {
+      id: order.id,
+      status: order.status,
+      total_amount: order.total_amount,
+      created_at: order.created_at,
+      user_name: order.user_name,
+      payment_method: order.payment_method,
+      shipping_address: shippingAddress,
+      items: (items || []).map((it) => ({
+        id: it.product_id,
+        name: it.name,
+        image: it.images,
+        quantity: it.quantity,
+        price: it.price,
+        options: {
+          color: it.selectedColor,
+          size: it.selectedSize,
+        },
+      })),
+    };
+
+    res.json(formatted);
+  } catch (err) {
+    console.error("Error fetching order details:", err);
+    res.status(500).json({ message: "Failed to fetch order details" });
+  }
+});
+
 
 /**
  * PUT /api/user/orders/:id/cancel
@@ -431,6 +563,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
