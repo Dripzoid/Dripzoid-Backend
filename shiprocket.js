@@ -322,6 +322,57 @@ async function cancelOrder(shiprocketOrderIds) {
   }
 }
 
+/**
+ * Track a Shiprocket order or shipment
+ * 
+ * You can call this using either:
+ *  - AWB code: trackOrder({ awb: "141123221084922" })
+ *  - or Shiprocket order_id: trackOrder({ order_id: 237157589 })
+ */
+async function trackOrder({ awb, order_id }) {
+  const token = await getToken();
+
+  if (!awb && !order_id) {
+    throw new Error("Either awb or order_id is required for tracking");
+  }
+
+  try {
+    const url = awb
+      ? `${API_BASE}/courier/track/awb/${awb}`
+      : `${API_BASE}/courier/track?order_id=${order_id}`;
+
+    const res = await axios.get(url, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      timeout: 15000,
+    });
+
+    // Shiprocket returns tracking_data object when successful
+    const data = res.data?.tracking_data;
+    if (!data) {
+      throw new Error("Tracking data not found in Shiprocket response");
+    }
+
+    return {
+      track_status: data.track_status,
+      shipment_status: data.shipment_status,
+      current_status:
+        data.shipment_track?.[0]?.current_status || data.shipment_track_activities?.[0]?.activity,
+      courier_name: data.shipment_track?.[0]?.courier_name,
+      awb_code: data.shipment_track?.[0]?.awb_code,
+      delivered_to: data.shipment_track?.[0]?.delivered_to,
+      track_url: data.track_url,
+      shipment_track: data.shipment_track || [],
+      shipment_track_activities: data.shipment_track_activities || [],
+      raw: data,
+    };
+  } catch (err) {
+    const remote = err.response?.data || err.message;
+    console.error("Shiprocket trackOrder Error:", remote);
+    throw new Error("Failed to track order: " + (remote?.message || remote));
+  }
+}
+
+
 export {
   getToken,
   checkServiceability,
@@ -330,6 +381,7 @@ export {
   createOrder,
   updateOrder,
   cancelOrder,
+   trackOrder,
 };
 
 export default {
@@ -340,4 +392,5 @@ export default {
   createOrder,
   updateOrder,
   cancelOrder,
+  trackOrder,
 };
