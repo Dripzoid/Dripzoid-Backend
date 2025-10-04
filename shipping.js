@@ -1,6 +1,6 @@
 // routes/shipping.js
 import express from "express";
-import { checkServiceability } from "./shiprocket.js"; // adjust path as needed
+import { checkServiceability, trackOrder } from "./shiprocket.js"; // ✅ include trackOrder
 
 const router = express.Router();
 
@@ -39,28 +39,27 @@ router.get("/estimate", async (req, res) => {
     if (!order_id && codRaw === undefined) {
       return res.status(400).json({
         success: false,
-        message:
-          "Either order_id or both cod and weight must be provided.",
+        message: "Either order_id or both cod and weight must be provided.",
       });
     }
 
     // Normalize parameters
-    const cod = codRaw !== undefined
-      ? (String(codRaw) === "1" || String(codRaw).toLowerCase() === "true" ? 1 : 0)
-      : 0; // default 0 if missing
+    const cod =
+      codRaw !== undefined
+        ? String(codRaw) === "1" || String(codRaw).toLowerCase() === "true"
+          ? 1
+          : 0
+        : 0; // default 0 if missing
 
-    // Default weight to "1" (string) if not provided
-    const weight = weightRaw ? String(weightRaw) : "1";
-
-    // Default dimensions
+    const weight = weightRaw ? String(weightRaw) : "1"; // default 1kg
     const shipmentLength = length ? Number(length) : 15;
     const shipmentBreadth = breadth ? Number(breadth) : 10;
     const shipmentHeight = height ? Number(height) : 5;
 
     const opts = {
       order_id: order_id ?? undefined,
-      cod: cod,
-      weight: weight, // string
+      cod,
+      weight,
       length: shipmentLength,
       breadth: shipmentBreadth,
       height: shipmentHeight,
@@ -68,7 +67,7 @@ router.get("/estimate", async (req, res) => {
       mode: mode ?? undefined,
       is_return: is_return !== undefined ? Number(is_return) : 0,
       qc_check: qc_check !== undefined ? Number(qc_check) : 0,
-      pickup_postcode: process.env.WAREHOUSE_PIN || 533450, // your verified warehouse
+      pickup_postcode: process.env.WAREHOUSE_PIN || 533450,
       delivery_postcode: Number(pin),
     };
 
@@ -79,7 +78,7 @@ router.get("/estimate", async (req, res) => {
     res.set("Surrogate-Control", "no-store");
 
     // Call Shiprocket serviceability
-   const estimate = await checkServiceability(Number(pin), opts);
+    const estimate = await checkServiceability(Number(pin), opts);
 
     return res.json({
       success: true,
@@ -91,6 +90,40 @@ router.get("/estimate", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: err.message || "Server error",
+    });
+  }
+});
+
+/**
+ * GET /api/shipping/track-order
+ * Query params:
+ *  - awb (optional)
+ *  - order_id (optional)
+ *
+ * One of awb or order_id is required.
+ */
+router.get("/track-order", async (req, res) => {
+  try {
+    const { awb, order_id } = req.query;
+
+    if (!awb && !order_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Either awb or order_id is required",
+      });
+    }
+
+    const trackingData = await trackOrder({ awb, order_id });
+
+    return res.json({
+      success: true,
+      tracking: trackingData,
+    });
+  } catch (err) {
+    console.error("Route /api/shipping/track-order error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Failed to fetch tracking data",
     });
   }
 });
