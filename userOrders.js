@@ -368,7 +368,7 @@ router.put("/:id/cancel", auth, async (req, res) => {
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
-    if (!["pending", "confirmed"].includes(order.status.toLowerCase())) {
+    if (!["pending", "confirmed","shipped","packed"].includes(order.status.toLowerCase())) {
       return res.status(400).json({ message: "Order cannot be cancelled" });
     }
 
@@ -563,6 +563,7 @@ router.get("/verify", (req, res) => {
 });
 
 export default router;
+
 
 
 
