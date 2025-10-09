@@ -215,7 +215,7 @@ router.get("/", auth, (req, res) => {
   }
 });
 
-// ✅ Verify if user purchased a product (for review eligibility)
+// ✅ Verify if user can review a product
 router.get("/verify", (req, res) => {
   const { productId, userId } = req.query;
 
@@ -223,38 +223,38 @@ router.get("/verify", (req, res) => {
     return res.status(400).json({ error: "Missing productId or userId" });
   }
 
-  // 1️⃣ Check if user has a delivered order containing the product
-  const purchaseSql = `
-    SELECT COUNT(*) AS count
+  // SQL: check both purchase and review status in one go
+  const sqlPurchase = `
+    SELECT COUNT(*) as count
     FROM order_items oi
     JOIN orders o ON oi.order_id = o.id
-    WHERE oi.product_id = ? 
-      AND o.user_id = ? 
-      AND LOWER(o.status) = 'delivered'
+    WHERE oi.product_id = ? AND o.user_id = ? AND LOWER(o.status) = 'delivered'
   `;
 
-  db.get(purchaseSql, [productId, userId], (err, purchaseRow) => {
+  const sqlReview = `
+    SELECT COUNT(*) as count
+    FROM reviews
+    WHERE productId = ? AND userId = ?
+  `;
+
+  // Run both queries
+  db.get(sqlPurchase, [productId, userId], (err, purchaseRow) => {
     if (err) return res.status(500).json({ error: err.message });
 
-    const canReview = purchaseRow.count > 0;
-
-    // 2️⃣ Check if user already reviewed the product
-    const reviewSql = `
-      SELECT COUNT(*) AS count
-      FROM reviews
-      WHERE productId = ? AND userId = ?
-    `;
-
-    db.get(reviewSql, [productId, userId], (err2, reviewRow) => {
+    db.get(sqlReview, [productId, userId], (err2, reviewRow) => {
       if (err2) return res.status(500).json({ error: err2.message });
 
       const hasReviewed = reviewRow.count > 0;
+      const hasPurchased = purchaseRow.count > 0;
 
-      // 3️⃣ Send combined response
+      // If user already reviewed, they can’t review again
+      const canReview = hasPurchased && !hasReviewed;
+
       res.json({ canReview, hasReviewed });
     });
   });
 });
+
 
 
 /**
@@ -584,6 +584,7 @@ router.get("/:id/invoice", auth, async (req, res) => {
 
 
 export default router;
+
 
 
 
