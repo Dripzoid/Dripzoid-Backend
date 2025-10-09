@@ -215,6 +215,29 @@ router.get("/", auth, (req, res) => {
   }
 });
 
+// ✅ Verify if user purchased a product (for review eligibility)
+router.get("/verify", (req, res) => {
+  const { productId, userId } = req.query;
+
+  if (!productId || !userId) {
+    return res.status(400).json({ error: "Missing productId or userId" });
+  }
+
+  const sql = `
+  SELECT COUNT(*) as count
+  FROM order_items oi
+  JOIN orders o ON oi.order_id = o.id
+  WHERE oi.product_id = ? AND o.user_id = ? AND LOWER(o.status) = 'delivered'
+`;
+
+
+  db.get(sql, [productId, userId], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    res.json({ canReview: row.count > 0 });
+  });
+});
+
 /**
  * GET /api/user/orders/:id
  * Fetch a single order (with items and address)
@@ -539,30 +562,10 @@ router.get("/:id/invoice", auth, async (req, res) => {
   }
 });
 
-// ✅ Verify if user purchased a product (for review eligibility)
-router.get("/verify", (req, res) => {
-  const { productId, userId } = req.query;
 
-  if (!productId || !userId) {
-    return res.status(400).json({ error: "Missing productId or userId" });
-  }
-
-  const sql = `
-  SELECT COUNT(*) as count
-  FROM order_items oi
-  JOIN orders o ON oi.order_id = o.id
-  WHERE oi.product_id = ? AND o.user_id = ? AND LOWER(o.status) = 'delivered'
-`;
-
-
-  db.get(sql, [productId, userId], (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-
-    res.json({ canReview: row.count > 0 });
-  });
-});
 
 export default router;
+
 
 
 
