@@ -223,20 +223,39 @@ router.get("/verify", (req, res) => {
     return res.status(400).json({ error: "Missing productId or userId" });
   }
 
-  const sql = `
-  SELECT COUNT(*) as count
-  FROM order_items oi
-  JOIN orders o ON oi.order_id = o.id
-  WHERE oi.product_id = ? AND o.user_id = ? AND LOWER(o.status) = 'delivered'
-`;
+  // 1️⃣ Check if user has a delivered order containing the product
+  const purchaseSql = `
+    SELECT COUNT(*) AS count
+    FROM order_items oi
+    JOIN orders o ON oi.order_id = o.id
+    WHERE oi.product_id = ? 
+      AND o.user_id = ? 
+      AND LOWER(o.status) = 'delivered'
+  `;
 
-
-  db.get(sql, [productId, userId], (err, row) => {
+  db.get(purchaseSql, [productId, userId], (err, purchaseRow) => {
     if (err) return res.status(500).json({ error: err.message });
 
-    res.json({ canReview: row.count > 0 });
+    const canReview = purchaseRow.count > 0;
+
+    // 2️⃣ Check if user already reviewed the product
+    const reviewSql = `
+      SELECT COUNT(*) AS count
+      FROM reviews
+      WHERE productId = ? AND userId = ?
+    `;
+
+    db.get(reviewSql, [productId, userId], (err2, reviewRow) => {
+      if (err2) return res.status(500).json({ error: err2.message });
+
+      const hasReviewed = reviewRow.count > 0;
+
+      // 3️⃣ Send combined response
+      res.json({ canReview, hasReviewed });
+    });
   });
 });
+
 
 /**
  * GET /api/user/orders/:id
@@ -565,6 +584,7 @@ router.get("/:id/invoice", auth, async (req, res) => {
 
 
 export default router;
+
 
 
 
