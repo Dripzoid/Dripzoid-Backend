@@ -97,24 +97,47 @@ router.get("/estimate", async (req, res) => {
 /**
  * GET /api/shipping/track-order
  * Query params:
- *  - awb (optional)
- *  - order_id (optional)
+ *  - order_id (required) → your local order ID
  *
- * One of awb or order_id is required.
+ * This route:
+ *   1. Looks up the corresponding Shiprocket order_id in your DB
+ *   2. Tracks the shipment using Shiprocket's tracking API
  */
+
+import express from "express";
+import { trackOrder } from "./shiprocket.js"; // adjust import as needed
+import db from "../db.js"; // adjust path (assuming you’re using sqlite/mysql/pg, etc.)
+
+const router = express.Router();
+
 router.get("/track-order", async (req, res) => {
   try {
-    const { awb, order_id } = req.query;
+    const { order_id } = req.query;
 
-    if (!awb && !order_id) {
+    if (!order_id) {
       return res.status(400).json({
         success: false,
-        message: "Either awb or order_id is required",
+        message: "order_id is required",
       });
     }
 
-    const trackingData = await trackOrder({ awb, order_id });
+    // 1️⃣ Lookup the Shiprocket order_id from local DB
+    const sql = `SELECT shiprocket_order_id FROM orders WHERE id = ? LIMIT 1`;
+    const [row] = await db.query(sql, [order_id]);
 
+    if (!row || !row.shiprocket_order_id) {
+      return res.status(404).json({
+        success: false,
+        message: "Shiprocket order_id not found for this order",
+      });
+    }
+
+    const shiprocketOrderId = row.shiprocket_order_id;
+
+    // 2️⃣ Fetch tracking info from Shiprocket
+    const trackingData = await trackOrder(shiprocketOrderId);
+
+    // 3️⃣ Respond with tracking data
     return res.json({
       success: true,
       tracking: trackingData,
@@ -127,5 +150,8 @@ router.get("/track-order", async (req, res) => {
     });
   }
 });
+
+export default router;
+
 
 export default router;
