@@ -1,6 +1,8 @@
 // routes/shipping.js
 import express from "express";
 import { checkServiceability, trackOrder } from "./shiprocket.js"; // ✅ include trackOrder
+import db from "../db.js"; // adjust path (assuming you’re using sqlite/mysql/pg, etc.)
+
 
 const router = express.Router();
 
@@ -103,13 +105,6 @@ router.get("/estimate", async (req, res) => {
  *   1. Looks up the corresponding Shiprocket order_id in your DB
  *   2. Tracks the shipment using Shiprocket's tracking API
  */
-
-import express from "express";
-import { trackOrder } from "./shiprocket.js"; // adjust import as needed
-import db from "../db.js"; // adjust path (assuming you’re using sqlite/mysql/pg, etc.)
-
-const router = express.Router();
-
 router.get("/track-order", async (req, res) => {
   try {
     const { order_id } = req.query;
