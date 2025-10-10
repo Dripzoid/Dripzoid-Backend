@@ -328,7 +328,7 @@ async function cancelOrder(shiprocketOrderIds) {
  *   const tracking = await trackOrder(237157589);
  *   console.log(tracking.current_status);
  */
-async function trackOrder(order_id) {
+async function trackOrder({ order_id }) {
   if (!order_id) {
     throw new Error("Shiprocket order_id is required for tracking");
   }
@@ -346,33 +346,39 @@ async function trackOrder(order_id) {
       timeout: 15000,
     });
 
-    // Shiprocket sometimes wraps tracking_data inside an array
-    const trackingObj = Array.isArray(res.data)
-      ? res.data[0]?.tracking_data
-      : res.data?.tracking_data;
+    const resData = res.data;
+
+    // 1️⃣ Normal location
+    let trackingObj = resData.tracking_data;
+
+    // 2️⃣ Fallback if API wraps it in data array
+    if (!trackingObj && Array.isArray(resData.data) && resData.data.length > 0) {
+      trackingObj = resData.data[0].tracking_data;
+    }
 
     if (!trackingObj) {
+      console.error("Shiprocket API response:", resData);
       throw new Error("Tracking data not found in Shiprocket response");
     }
 
-    const shipment = trackingObj.shipment_track?.[0] || {};
-    const activities = trackingObj.shipment_track_activities || [];
+    const shipment = Array.isArray(trackingObj.shipment_track) ? trackingObj.shipment_track[0] : {};
+    const activities = Array.isArray(trackingObj.shipment_track_activities) ? trackingObj.shipment_track_activities : [];
 
     return {
-      track_status: trackingObj.track_status,               // e.g. 1
-      shipment_status: trackingObj.shipment_status,         // e.g. 42
-      current_status: shipment.current_status || activities[0]?.activity,
+      track_status: trackingObj.track_status,
+      shipment_status: trackingObj.shipment_status,
+      current_status: shipment.current_status || activities[0]?.activity || "Unknown",
       courier_name: shipment.courier_name || "Unknown",
-      awb_code: shipment.awb_code,
-      delivered_to: shipment.delivered_to,
-      destination: shipment.destination,
-      origin: shipment.origin,
-      consignee_name: shipment.consignee_name,
-      etd: trackingObj.etd,
-      track_url: trackingObj.track_url,
+      awb_code: shipment.awb_code || null,
+      delivered_to: shipment.delivered_to || null,
+      destination: shipment.destination || null,
+      origin: shipment.origin || null,
+      consignee_name: shipment.consignee_name || null,
+      etd: trackingObj.etd || null,
+      track_url: trackingObj.track_url || null,
       shipment_track: trackingObj.shipment_track || [],
-      shipment_track_activities: activities,
-      raw: trackingObj, // keep full object for debugging or detail display
+      shipment_track_activities: trackingObj.shipment_track_activities || [],
+      raw: trackingObj, // keep full object for debugging or UI
     };
   } catch (err) {
     const remote = err.response?.data || err.message;
@@ -380,6 +386,7 @@ async function trackOrder(order_id) {
     throw new Error("Failed to track order: " + (remote?.message || remote));
   }
 }
+
 
 
 
