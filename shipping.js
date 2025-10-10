@@ -109,23 +109,32 @@ router.get("/estimate", async (req, res) => {
 router.post("/track-order", async (req, res) => {
   try {
     let { order_id } = req.body;
-    console.log("Frontend order_id received:", order_id);
+
 
     if (!order_id) {
       return res.status(400).json({ success: false, message: "order_id is required" });
     }
 
+    // Ensure order_id is a number
     order_id = parseInt(order_id, 10);
     if (isNaN(order_id)) {
       return res.status(400).json({ success: false, message: "order_id must be a number" });
     }
 
-    // ✅ Prepare and execute query
-    const stmt = db.prepare("SELECT shiprocket_order_id FROM orders WHERE id = ?");
-    const row = stmt.get(order_id); 
-    console.log("Fetched DB row:", row);
+    // ----------------- Fetch row from SQLite -----------------
+    const row = await new Promise((resolve, reject) => {
+      db.get(
+        "SELECT shiprocket_order_id FROM orders WHERE id = ?",
+        [order_id],
+        (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        }
+      );
+    });
 
-    const shiprocketOrderId = row?.shiprocket_order_id?.toString().trim();
+
+    const shiprocketOrderId = row?.shiprocket_order_id?.trim();
     if (!shiprocketOrderId) {
       return res.status(404).json({
         success: false,
@@ -133,8 +142,10 @@ router.post("/track-order", async (req, res) => {
       });
     }
 
+    // ----------------- Fetch tracking from Shiprocket -----------------
     const trackingData = await trackOrder(shiprocketOrderId);
 
+    // ----------------- Respond -----------------
     return res.json({
       success: true,
       message: "Tracking information retrieved successfully",
@@ -148,6 +159,7 @@ router.post("/track-order", async (req, res) => {
     });
   }
 });
+
 
 
 
