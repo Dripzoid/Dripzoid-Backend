@@ -348,12 +348,10 @@ async function trackOrder({ order_id }) {
 
     const resData = res.data;
 
-    // 1️⃣ Normal location
-    let trackingObj = resData.tracking_data;
-
-    // 2️⃣ Fallback if API wraps it in data array
-    if (!trackingObj && Array.isArray(resData.data) && resData.data.length > 0) {
-      trackingObj = resData.data[0].tracking_data;
+    // Shiprocket returns [{ 'order_id': { tracking_data: {...} } }]
+    let trackingObj;
+    if (Array.isArray(resData) && resData.length > 0 && resData[0][order_id]) {
+      trackingObj = resData[0][order_id].tracking_data;
     }
 
     if (!trackingObj) {
@@ -378,7 +376,7 @@ async function trackOrder({ order_id }) {
       track_url: trackingObj.track_url || null,
       shipment_track: trackingObj.shipment_track || [],
       shipment_track_activities: trackingObj.shipment_track_activities || [],
-      raw: trackingObj, // keep full object for debugging or UI
+      raw: trackingObj,
     };
   } catch (err) {
     const remote = err.response?.data || err.message;
