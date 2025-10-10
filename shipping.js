@@ -105,9 +105,10 @@ router.get("/estimate", async (req, res) => {
  *   1. Looks up the corresponding Shiprocket order_id in your DB
  *   2. Tracks the shipment using Shiprocket's tracking API
  */
-router.get("/track-order", async (req, res) => {
+// ------------------ Track Order ------------------
+router.post("/track-order", async (req, res) => {
   try {
-    const { order_id } = req.query;
+    const { order_id } = req.body; // ✅ read from body (frontend sends in POST)
 
     if (!order_id) {
       return res.status(400).json({
@@ -116,9 +117,10 @@ router.get("/track-order", async (req, res) => {
       });
     }
 
-    // 1️⃣ Lookup the Shiprocket order_id from local DB
+    // 1️⃣ Lookup Shiprocket order_id from local DB
     const sql = `SELECT shiprocket_order_id FROM orders WHERE id = ? LIMIT 1`;
-    const [row] = await db.query(sql, [order_id]);
+    const [rows] = await db.query(sql, [order_id]);
+    const row = rows?.[0] || rows; // handles both array and object results (MySQL vs SQLite)
 
     if (!row || !row.shiprocket_order_id) {
       return res.status(404).json({
@@ -132,9 +134,10 @@ router.get("/track-order", async (req, res) => {
     // 2️⃣ Fetch tracking info from Shiprocket
     const trackingData = await trackOrder(shiprocketOrderId);
 
-    // 3️⃣ Respond with tracking data
+    // 3️⃣ Respond with structured tracking data
     return res.json({
       success: true,
+      message: "Tracking information retrieved successfully",
       tracking: trackingData,
     });
   } catch (err) {
@@ -145,5 +148,6 @@ router.get("/track-order", async (req, res) => {
     });
   }
 });
+
 
 export default router;
