@@ -108,38 +108,22 @@ router.get("/estimate", async (req, res) => {
 // ------------------ Track Order ------------------
 router.post("/track-order", async (req, res) => {
   try {
-    const { order_id } = req.body; // ✅ read from body (frontend sends in POST)
+    const { order_id } = req.body;
 
     if (!order_id) {
-      return res.status(400).json({
-        success: false,
-        message: "order_id is required",
-      });
+      return res.status(400).json({ success: false, message: "order_id is required" });
     }
 
-    // 1️⃣ Lookup Shiprocket order_id from local DB
-    const sql = `SELECT shiprocket_order_id FROM orders WHERE id = ? LIMIT 1`;
-    const [rows] = await db.query(sql, [order_id]);
-    const row = rows?.[0] || rows; // handles both array and object results (MySQL vs SQLite)
+    // ✅ SQLite version
+    const row = db.prepare("SELECT shiprocket_order_id FROM orders WHERE id = ? LIMIT 1").get(order_id);
 
     if (!row || !row.shiprocket_order_id) {
-      return res.status(404).json({
-        success: false,
-        message: "Shiprocket order_id not found for this order",
-      });
+      return res.status(404).json({ success: false, message: "Shiprocket order_id not found for this order" });
     }
 
-    const shiprocketOrderId = row.shiprocket_order_id;
+    const trackingData = await trackOrder(row.shiprocket_order_id);
 
-    // 2️⃣ Fetch tracking info from Shiprocket
-    const trackingData = await trackOrder(shiprocketOrderId);
-
-    // 3️⃣ Respond with structured tracking data
-    return res.json({
-      success: true,
-      message: "Tracking information retrieved successfully",
-      tracking: trackingData,
-    });
+    return res.json({ success: true, tracking: trackingData });
   } catch (err) {
     console.error("Route /api/shipping/track-order error:", err);
     return res.status(500).json({
@@ -148,6 +132,7 @@ router.post("/track-order", async (req, res) => {
     });
   }
 });
+
 
 
 export default router;
