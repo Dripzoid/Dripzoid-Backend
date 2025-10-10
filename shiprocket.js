@@ -328,7 +328,7 @@ async function cancelOrder(shiprocketOrderIds) {
  *   const tracking = await trackOrder(237157589);
  *   console.log(tracking.current_status);
  */
-export async function trackOrder(order_id) {
+async function trackOrder(order_id) {
   if (!order_id) {
     throw new Error("Shiprocket order_id is required for tracking");
   }
