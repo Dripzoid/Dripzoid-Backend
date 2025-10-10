@@ -143,7 +143,7 @@ router.post("/track-order", async (req, res) => {
     }
 
     // ----------------- Fetch tracking from Shiprocket -----------------
-    const trackingData = await trackOrder(shiprocketOrderId);
+   const trackingData = await trackOrder({ order_id: shiprocketOrderId });
 
     // ----------------- Respond -----------------
     return res.json({
