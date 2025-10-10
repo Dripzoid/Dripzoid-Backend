@@ -1,7 +1,7 @@
 // routes/shipping.js
 import express from "express";
 import { checkServiceability, trackOrder } from "./shiprocket.js"; // ✅ include trackOrder
-import db from "../db.js"; // adjust path (assuming you’re using sqlite/mysql/pg, etc.)
+import db from "./db.js"; // adjust path (assuming you’re using sqlite/mysql/pg, etc.)
 
 
 const router = express.Router();
