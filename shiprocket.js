@@ -329,11 +329,6 @@ async function cancelOrder(shiprocketOrderIds) {
  *   const tracking = await trackOrder(237157589);
  *   console.log(tracking.current_status);
  */
-import axios from "axios";
-import { getToken } from "./shiprocketAuth.js"; // adjust path as needed
-
-const API_BASE = "https://apiv2.shiprocket.in/v1/external";
-
 export async function trackOrder(order_id) {
   if (!order_id) {
     throw new Error("Shiprocket order_id is required for tracking");
