@@ -1,12 +1,16 @@
+// routes/shipping.js
+import express from "express";
 import { checkServiceability, trackOrder, generateInvoice } from "./shiprocket.js";
-import axios from "axios"; // for file download stream if needed
+import axios from "axios";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import db from "./db.js"; // ensure this path is correct for your project
 
 // Define __dirname for ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const router = express.Router();
 
 /**
@@ -34,17 +38,13 @@ router.post("/download-invoice", async (req, res) => {
 
     // ---------------- Fetch Shiprocket order_id from DB ----------------
     const row = await new Promise((resolve, reject) => {
-      db.get(
-        "SELECT shiprocket_order_id FROM orders WHERE id = ?",
-        [order_id],
-        (err, row) => {
-          if (err) reject(err);
-          else resolve(row);
-        }
-      );
+      db.get("SELECT shiprocket_order_id FROM orders WHERE id = ?", [order_id], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
     });
 
-    const shiprocketOrderId = row?.shiprocket_order_id?.trim();
+    const shiprocketOrderId = row?.shiprocket_order_id ? String(row.shiprocket_order_id).trim() : null;
     if (!shiprocketOrderId) {
       return res.status(404).json({
         success: false,
@@ -65,15 +65,15 @@ router.post("/download-invoice", async (req, res) => {
     const invoiceUrl = invoiceData.invoice_url;
 
     // ---------------- Download the invoice PDF ----------------
-    const response = await axios.get(invoiceUrl, { responseType: "arraybuffer" });
+    const response = await axios.get(invoiceUrl, { responseType: "arraybuffer", timeout: 20000 });
 
     // Optional: save locally if you want
+    const invoicesDir = path.join(__dirname, "../invoices");
     const invoiceFileName = `invoice_${shiprocketOrderId}.pdf`;
-    const invoicePath = path.join(__dirname, "../invoices", invoiceFileName);
+    const invoicePath = path.join(invoicesDir, invoiceFileName);
 
-    // Ensure folder exists
-    fs.mkdirSync(path.dirname(invoicePath), { recursive: true });
-
+    // Ensure folder exists and write file
+    fs.mkdirSync(invoicesDir, { recursive: true });
     fs.writeFileSync(invoicePath, response.data);
 
     // ---------------- Send file to frontend ----------------
@@ -84,11 +84,10 @@ router.post("/download-invoice", async (req, res) => {
     console.error("Route /api/shipping/download-invoice error:", err);
     return res.status(500).json({
       success: false,
-      message: err.message || "Failed to download invoice",
+      message: err?.message || "Failed to download invoice",
     });
   }
 });
-
 
 /**
  * GET /api/shipping/estimate
@@ -116,9 +115,7 @@ router.get("/estimate", async (req, res) => {
     } = req.query;
 
     if (!pin) {
-      return res
-        .status(400)
-        .json({ success: false, message: "pin (delivery_postcode) is required" });
+      return res.status(400).json({ success: false, message: "pin (delivery_postcode) is required" });
     }
 
     // Either order_id OR both cod and weight must be provided
@@ -153,7 +150,7 @@ router.get("/estimate", async (req, res) => {
       mode: mode ?? undefined,
       is_return: is_return !== undefined ? Number(is_return) : 0,
       qc_check: qc_check !== undefined ? Number(qc_check) : 0,
-      pickup_postcode: process.env.WAREHOUSE_PIN || 533450,
+      pickup_postcode: process.env.WAREHOUSE_PIN || process.env.WAREHOUSE_PINCODE || 533450,
       delivery_postcode: Number(pin),
     };
 
@@ -175,25 +172,23 @@ router.get("/estimate", async (req, res) => {
     console.error("Route /api/shipping/estimate error:", err);
     return res.status(500).json({
       success: false,
-      message: err.message || "Server error",
+      message: err?.message || "Server error",
     });
   }
 });
 
 /**
- * GET /api/shipping/track-order
- * Query params:
+ * POST /api/shipping/track-order
+ * Body:
  *  - order_id (required) → your local order ID
  *
  * This route:
  *   1. Looks up the corresponding Shiprocket order_id in your DB
  *   2. Tracks the shipment using Shiprocket's tracking API
  */
-// ------------------ Track Order ------------------
 router.post("/track-order", async (req, res) => {
   try {
     let { order_id } = req.body;
-
 
     if (!order_id) {
       return res.status(400).json({ success: false, message: "order_id is required" });
@@ -205,20 +200,15 @@ router.post("/track-order", async (req, res) => {
       return res.status(400).json({ success: false, message: "order_id must be a number" });
     }
 
-    // ----------------- Fetch row from SQLite -----------------
+    // ----------------- Fetch row from DB -----------------
     const row = await new Promise((resolve, reject) => {
-      db.get(
-        "SELECT shiprocket_order_id FROM orders WHERE id = ?",
-        [order_id],
-        (err, row) => {
-          if (err) reject(err);
-          else resolve(row);
-        }
-      );
+      db.get("SELECT shiprocket_order_id FROM orders WHERE id = ?", [order_id], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
     });
 
-
-    const shiprocketOrderId = row?.shiprocket_order_id?.trim();
+    const shiprocketOrderId = row?.shiprocket_order_id ? String(row.shiprocket_order_id).trim() : null;
     if (!shiprocketOrderId) {
       return res.status(404).json({
         success: false,
@@ -227,7 +217,7 @@ router.post("/track-order", async (req, res) => {
     }
 
     // ----------------- Fetch tracking from Shiprocket -----------------
-   const trackingData = await trackOrder({ order_id: shiprocketOrderId });
+    const trackingData = await trackOrder({ order_id: shiprocketOrderId });
 
     // ----------------- Respond -----------------
     return res.json({
@@ -239,13 +229,9 @@ router.post("/track-order", async (req, res) => {
     console.error("Route /api/shipping/track-order error:", err);
     return res.status(500).json({
       success: false,
-      message: err.message || "Failed to fetch tracking data",
+      message: err?.message || "Failed to fetch tracking data",
     });
   }
 });
-
-
-
-
 
 export default router;
