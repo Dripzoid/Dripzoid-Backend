@@ -1,9 +1,92 @@
-// routes/shipping.js
-import express from "express";
-import { checkServiceability, trackOrder } from "./shiprocket.js"; // ✅ include trackOrder
-import db from "./db.js"; // adjust path (assuming you’re using sqlite/mysql/pg, etc.)
+import { checkServiceability, trackOrder, generateInvoice } from "./shiprocket.js";
+import axios from "axios"; // for file download stream if needed
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
+// Define __dirname for ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
+/**
+ * POST /api/shipping/download-invoice
+ * Body:
+ *   - order_id (your local order ID)
+ *
+ * This route:
+ *   1. Fetches the corresponding Shiprocket order_id from your DB
+ *   2. Generates the invoice via Shiprocket API (returns PDF URL)
+ *   3. Downloads the PDF and returns it to frontend
+ */
+router.post("/download-invoice", async (req, res) => {
+  try {
+    let { order_id } = req.body;
+
+    if (!order_id) {
+      return res.status(400).json({ success: false, message: "order_id is required" });
+    }
+
+    order_id = parseInt(order_id, 10);
+    if (isNaN(order_id)) {
+      return res.status(400).json({ success: false, message: "order_id must be a number" });
+    }
+
+    // ---------------- Fetch Shiprocket order_id from DB ----------------
+    const row = await new Promise((resolve, reject) => {
+      db.get(
+        "SELECT shiprocket_order_id FROM orders WHERE id = ?",
+        [order_id],
+        (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        }
+      );
+    });
+
+    const shiprocketOrderId = row?.shiprocket_order_id?.trim();
+    if (!shiprocketOrderId) {
+      return res.status(404).json({
+        success: false,
+        message: "Shiprocket order_id not found for this order",
+      });
+    }
+
+    // ---------------- Generate invoice via Shiprocket API ----------------
+    const invoiceData = await generateInvoice(shiprocketOrderId);
+
+    if (!invoiceData?.invoice_url) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to generate invoice or missing invoice URL",
+      });
+    }
+
+    const invoiceUrl = invoiceData.invoice_url;
+
+    // ---------------- Download the invoice PDF ----------------
+    const response = await axios.get(invoiceUrl, { responseType: "arraybuffer" });
+
+    // Optional: save locally if you want
+    const invoiceFileName = `invoice_${shiprocketOrderId}.pdf`;
+    const invoicePath = path.join(__dirname, "../invoices", invoiceFileName);
+
+    // Ensure folder exists
+    fs.mkdirSync(path.dirname(invoicePath), { recursive: true });
+
+    fs.writeFileSync(invoicePath, response.data);
+
+    // ---------------- Send file to frontend ----------------
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${invoiceFileName}"`);
+    return res.send(response.data);
+  } catch (err) {
+    console.error("Route /api/shipping/download-invoice error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Failed to download invoice",
+    });
+  }
+});
 const router = express.Router();
 
 /**
