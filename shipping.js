@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 // Define __dirname for ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const router = express.Router();
 
 /**
  * POST /api/shipping/download-invoice
@@ -87,7 +88,7 @@ router.post("/download-invoice", async (req, res) => {
     });
   }
 });
-const router = express.Router();
+
 
 /**
  * GET /api/shipping/estimate
