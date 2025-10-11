@@ -323,6 +323,57 @@ async function cancelOrder(shiprocketOrderIds) {
 }
 
 /**
+ * Generate invoice for a Shiprocket order
+ * Example:
+ *   const invoice = await generateInvoice(shiprocket_order_id);
+ *   console.log(invoice.invoice_url);
+ */
+async function generateInvoice(shiprocket_order_id) {
+  if (!shiprocket_order_id) {
+    throw new Error("shiprocket_order_id is required to generate invoice");
+  }
+
+  const token = await getToken();
+
+  try {
+    const res = await axios.post(
+      `${API_BASE}/orders/print/invoice`,
+      { ids: [shiprocket_order_id] },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 15000,
+      }
+    );
+
+    // Example response:
+    // {
+    //   "is_invoice_created": true,
+    //   "invoice_url": "https://s3-ap-southeast-1.amazonaws.com/kr-shipmultichannel/...pdf",
+    //   "not_created": []
+    // }
+
+    const data = res.data || {};
+    if (!data.is_invoice_created || !data.invoice_url) {
+      throw new Error("Invoice generation failed or invoice URL not returned");
+    }
+
+    return {
+      success: data.is_invoice_created,
+      invoice_url: data.invoice_url,
+      not_created: data.not_created || [],
+    };
+  } catch (err) {
+    const remote = err.response?.data || err.message;
+    console.error("Shiprocket generateInvoice Error:", remote);
+    throw new Error("Failed to generate invoice: " + (remote?.message || remote));
+  }
+}
+
+
+/**
  * Track a Shiprocket order using Shiprocket's order_id
  * Example:
  *   const tracking = await trackOrder(237157589);
@@ -397,6 +448,7 @@ export {
   updateOrder,
   cancelOrder,
    trackOrder,
+  generateInvoice,
 };
 
 export default {
@@ -408,4 +460,5 @@ export default {
   updateOrder,
   cancelOrder,
   trackOrder,
+  generateInvoice,
 };
