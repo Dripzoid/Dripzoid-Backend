@@ -121,12 +121,75 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
   const amountPaise = Math.round(totalAmtNumber * 100);
 
   try {
+    // --- Prepare Shiprocket Payload ---
+    const address = shipping || {};
+    const userName =
+      address.name ||
+      `${address.first_name || ""} ${address.last_name || ""}`.trim() ||
+      req.user?.name ||
+      `${req.user?.first_name || ""} ${req.user?.last_name || ""}`.trim() ||
+      "Customer";
+
+    const nameParts = userName.split(" ");
+    const firstName = nameParts[0] || "Customer";
+    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
+
+    const shiprocketPayload = {
+      order_id: `TEMP-${Date.now()}`, // temporary, will replace after DB insert
+      order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
+      pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
+      channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
+
+      billing_customer_name: firstName,
+      billing_last_name: lastName,
+      billing_address: address.line1 || address.address || "N/A",
+      billing_address_2: address.line2 || "",
+      billing_city: address.city || "N/A",
+      billing_pincode: address.pincode || "000000",
+      billing_state: address.state || "N/A",
+      billing_country: address.country || "India",
+      billing_email: address.email || req.user?.email || "noreply@example.com",
+      billing_phone: address.phone || req.user?.phone || "0000000000",
+
+      shipping_is_billing: true,
+      order_items: items.map((i) => ({
+        name: i.name || `Product ${i.product_id}`,
+        sku: i.sku || `SKU-${i.product_id}`,
+        units: i.quantity,
+        selling_price: i.unit_price || i.price || 0,
+      })),
+      payment_method: "Prepaid",
+      sub_total: totalAmtNumber,
+      total_discount: 0,
+      length: 10,
+      breadth: 10,
+      height: 10,
+      weight: 0.5,
+    };
+
+    // --- Create Shiprocket order first ---
+    let shiprocketOrder;
+    try {
+      shiprocketOrder = await createShiprocketOrder(shiprocketPayload);
+      if (!shiprocketOrder?.order_id) {
+        return res.status(500).json({
+          error: "Shiprocket order creation failed",
+          details: shiprocketOrder || "Unknown error",
+        });
+      }
+    } catch (err) {
+      console.error("⚠️ Shiprocket createOrder failed:", err.message);
+      return res.status(500).json({ error: "Shiprocket order creation failed", details: err.message });
+    }
+
+    const shiprocketOrderId = shiprocketOrder.order_id;
+
     // --- Insert order into DB ---
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO orders (user_id, shipping_json, total_amount, status) 
-         VALUES (?, ?, ?, 'Pending')`,
-        [req.user.id, JSON.stringify(shipping || {}), totalAmtNumber],
+        `INSERT INTO orders (user_id, shipping_json, total_amount, status, shiprocket_order_id) 
+         VALUES (?, ?, ?, 'Pending', ?)`,
+        [req.user.id, JSON.stringify(shipping || {}), totalAmtNumber, shiprocketOrderId],
         function (err) {
           if (err) return reject(err);
           resolve({ id: this.lastID });
@@ -134,7 +197,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       );
     });
 
-    // --- Insert items ---
+    // --- Insert order items ---
     for (const item of items) {
       const unitPrice = Number(item.unit_price || item.price || 0);
       const quantity = Number(item.quantity || 1);
@@ -168,81 +231,21 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       notes: { internalOrderId: orderResult.id.toString() },
     });
 
-    // --- Prepare Shiprocket Payload ---
-    const address = shipping || {};
-    const userName =
-      address.name ||
-      `${address.first_name || ""} ${address.last_name || ""}`.trim() ||
-      req.user?.name ||
-      `${req.user?.first_name || ""} ${req.user?.last_name || ""}`.trim() ||
-      "Customer";
+    // --- Update Razorpay details in DB ---
+    await new Promise((resolve, reject) => {
+      db.run(
+        `UPDATE orders 
+         SET razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP 
+         WHERE id = ?`,
+        [razorOrder.id, razorOrder.amount, orderResult.id],
+        function (err) {
+          if (err) return reject(err);
+          resolve();
+        }
+      );
+    });
 
-    const nameParts = userName.split(" ");
-    const firstName = nameParts[0] || "Customer";
-    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
-
-    const shiprocketPayload = {
-      order_id: `ORD-${orderResult.id}`,
-      order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
-      pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
-      channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
-
-      billing_customer_name: firstName,
-      billing_last_name: lastName,
-      billing_address: address.line1 || address.address || "N/A",
-      billing_address_2: address.line2 || "",
-      billing_city: address.city || "N/A",
-      billing_pincode: address.pincode || "000000",
-      billing_state: address.state || "N/A",
-      billing_country: address.country || "India",
-      billing_email: address.email || req.user?.email || "noreply@example.com",
-      billing_phone: address.phone || req.user?.phone || "0000000000",
-
-      shipping_is_billing: true,
-      order_items: items.map((i) => ({
-        name: i.name || `Product ${i.product_id}`,
-        sku: i.sku || `SKU-${i.product_id}`,
-        units: i.quantity,
-        selling_price: i.unit_price || i.price || 0,
-      })),
-      payment_method: "Prepaid",
-      sub_total: totalAmtNumber,
-      total_discount: 0,
-      length: 10,
-      breadth: 10,
-      height: 10,
-      weight: 0.5,
-    };
-
-    console.log("✅ Shiprocket Payload:", shiprocketPayload);
-
-    // --- Create Shiprocket order ---
-    let shiprocketOrderId = null;
-    try {
-      const shipRes = await createShiprocketOrder(shiprocketPayload);
-      shiprocketOrderId = shipRes?.order_id || null;
-
-      if (shiprocketOrderId) {
-        await new Promise((resolve, reject) => {
-          db.run(
-            `UPDATE orders 
-             SET shiprocket_order_id = ?, razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP 
-             WHERE id = ?`,
-            [shiprocketOrderId, razorOrder.id, razorOrder.amount, orderResult.id],
-            function (err) {
-              if (err) return reject(err);
-              resolve();
-            }
-          );
-        });
-      } else {
-        console.warn("⚠️ Shiprocket order created but returned no order_id");
-      }
-    } catch (err) {
-      console.error("⚠️ Shiprocket createOrder failed:", err.message);
-    }
-
-    // --- Insert user activity ---
+    // --- Log user activity ---
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
@@ -256,14 +259,14 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
 
     res.json({
       success: true,
+      internalOrderId: orderResult.id,
       razorpayOrderId: razorOrder.id,
       amount: razorOrder.amount,
       currency: razorOrder.currency,
-      internalOrderId: orderResult.id,
       shiprocketOrderId,
     });
   } catch (err) {
-    console.error("Razorpay create-order error:", err.message);
+    console.error("Create order error:", err.message);
     res.status(500).json({ error: "Failed to create order", details: err.message });
   }
 });
@@ -321,5 +324,6 @@ router.post("/razorpay/verify", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
