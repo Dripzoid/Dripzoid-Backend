@@ -59,7 +59,7 @@ router.post("/place-order", auth, async (req, res) => {
     const orderInsert = await runQuery(
       `INSERT INTO orders 
        (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now','localtime'))`,
+       VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', datetime('now','localtime'))`,
       [
         userId,
         shippingAddrNormalized.id ?? null,
@@ -95,7 +95,7 @@ router.post("/place-order", auth, async (req, res) => {
       order_id: `LOCAL-${orderId}`, // reference
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
       pickup_location: process.env.SHIPROCKET_PICKUP || "warehouse",
-      billing_customer_name: req.user?.name || "Customer",
+      billing_customer_name: address.name || req.user?.name || "Customer",
       billing_last_name: "",
       billing_address: shippingAddrNormalized.line1,
       billing_address_2: shippingAddrNormalized.line2,
@@ -152,3 +152,4 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
