@@ -108,6 +108,7 @@ db.run(
 // ---------------- CREATE RAZORPAY + SHIPROCKET ORDER ----------------
 router.post("/razorpay/create-order", auth, async (req, res) => {
   const { items, shipping, totalAmount } = req.body;
+
   if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "No items provided" });
   }
@@ -167,44 +168,53 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       notes: { internalOrderId: orderResult.id.toString() },
     });
 
-    // --- Build Shiprocket payload ---
-const address = shipping || {};
+    // --- Prepare Shiprocket Payload ---
+    const address = shipping || {};
+    const userName =
+      address.name ||
+      `${address.first_name || ""} ${address.last_name || ""}`.trim() ||
+      req.user?.name ||
+      `${req.user?.first_name || ""} ${req.user?.last_name || ""}`.trim() ||
+      "Customer";
 
-const shiprocketPayload = {
-  order_id: `ORD-${orderResult.id}`,
-  order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
-  pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
-  channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
+    const nameParts = userName.split(" ");
+    const firstName = nameParts[0] || "Customer";
+    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
-  billing_customer_name: address.name || req.user?.name || "Customer",
-  billing_last_name: "",
-  billing_address: address.line1 || address.address || "N/A",   // fallback
-  billing_address_2: address.line2 || "",
-  billing_city: address.city || "N/A",
-  billing_pincode: address.pincode || "000000",                 // must be 6-digit
-  billing_state: address.state || "N/A",
-  billing_country: address.country || "India",
-  billing_email: address.email || req.user?.email || "noreply@example.com",
-  billing_phone: address.phone || "0000000000",                // fallback
+    const shiprocketPayload = {
+      order_id: `ORD-${orderResult.id}`,
+      order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
+      pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
+      channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
 
-  shipping_is_billing: true,
-  order_items: items.map((i) => ({
-    name: i.name || `Product ${i.product_id}`,
-    sku: i.sku || `SKU-${i.product_id}`,
-    units: i.quantity,
-    selling_price: i.unit_price || i.price || 0,
-  })),
-  payment_method: "Prepaid",
-  sub_total: totalAmtNumber,
-  total_discount: 0,
-  length: 10,
-  breadth: 10,
-  height: 10,
-  weight: 0.5,
-};
+      billing_customer_name: firstName,
+      billing_last_name: lastName,
+      billing_address: address.line1 || address.address || "N/A",
+      billing_address_2: address.line2 || "",
+      billing_city: address.city || "N/A",
+      billing_pincode: address.pincode || "000000",
+      billing_state: address.state || "N/A",
+      billing_country: address.country || "India",
+      billing_email: address.email || req.user?.email || "noreply@example.com",
+      billing_phone: address.phone || req.user?.phone || "0000000000",
 
-// Optional: log payload for debugging
-console.log("Shiprocket Payload:", shiprocketPayload);
+      shipping_is_billing: true,
+      order_items: items.map((i) => ({
+        name: i.name || `Product ${i.product_id}`,
+        sku: i.sku || `SKU-${i.product_id}`,
+        units: i.quantity,
+        selling_price: i.unit_price || i.price || 0,
+      })),
+      payment_method: "Prepaid",
+      sub_total: totalAmtNumber,
+      total_discount: 0,
+      length: 10,
+      breadth: 10,
+      height: 10,
+      weight: 0.5,
+    };
+
+    console.log("✅ Shiprocket Payload:", shiprocketPayload);
 
     // --- Create Shiprocket order ---
     let shiprocketOrderId = null;
@@ -226,7 +236,7 @@ console.log("Shiprocket Payload:", shiprocketPayload);
           );
         });
       } else {
-        console.warn("Shiprocket order created but returned no order_id");
+        console.warn("⚠️ Shiprocket order created but returned no order_id");
       }
     } catch (err) {
       console.error("⚠️ Shiprocket createOrder failed:", err.message);
@@ -257,6 +267,7 @@ console.log("Shiprocket Payload:", shiprocketPayload);
     res.status(500).json({ error: "Failed to create order", details: err.message });
   }
 });
+
 
 // ---------------- VERIFY RAZORPAY PAYMENT ----------------
 router.post("/razorpay/verify", auth, async (req, res) => {
@@ -310,4 +321,5 @@ router.post("/razorpay/verify", auth, async (req, res) => {
 });
 
 export default router;
+
 
