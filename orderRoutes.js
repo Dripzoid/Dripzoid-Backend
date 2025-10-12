@@ -95,7 +95,7 @@ router.post("/place-order", auth, async (req, res) => {
       order_id: `ORD-${orderId}`, // reference
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
       pickup_location: process.env.SHIPROCKET_PICKUP || "warehouse",
-      billing_customer_name: address.name || req.user?.name || "Customer",
+      billing_customer_name: shippingAddrNormalized.name || req.user?.name || "Customer",
       billing_last_name: "",
       billing_address: shippingAddrNormalized.line1,
       billing_address_2: shippingAddrNormalized.line2,
@@ -152,5 +152,6 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
