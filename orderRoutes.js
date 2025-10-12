@@ -92,7 +92,7 @@ router.post("/place-order", auth, async (req, res) => {
 
     // --- Build Shiprocket payload ---
     const shiprocketPayload = {
-      order_id: `LOCAL-${orderId}`, // reference
+      order_id: `ORD-${orderId}`, // reference
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
       pickup_location: process.env.SHIPROCKET_PICKUP || "warehouse",
       billing_customer_name: address.name || req.user?.name || "Customer",
@@ -152,4 +152,5 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
 
