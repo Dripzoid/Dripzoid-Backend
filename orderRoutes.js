@@ -33,6 +33,7 @@ function allQuery(sql, params = []) {
 }
 
 // 🚀 Place Order Route
+// Place Order (corrected - robust item normalization + Shiprocket-first + DB insert)
 router.post("/place-order", auth, async (req, res) => {
   const {
     cartItems = [],
@@ -47,7 +48,7 @@ router.post("/place-order", auth, async (req, res) => {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-  // ✅ Normalize shipping address
+  // Normalize shipping address
   const shippingAddrNormalized = {
     ...shippingAddress,
     name:
@@ -63,18 +64,52 @@ router.post("/place-order", auth, async (req, res) => {
   };
 
   try {
-    // ✅ Parse and split customer name correctly before Shiprocket payload
+    // --- normalize and validate items ---
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "No items provided" });
+    }
+
+    const normalizedItems = items.map((it, idx) => {
+      const productId =
+        it.product_id ??
+        it.productId ??
+        it.id ??
+        (it.product && (it.product.id ?? it.product._id)) ??
+        null;
+
+      if (!productId) {
+        throw new Error(`Item at index ${idx} missing product id (product_id/productId/id/product.id)`);
+      }
+
+      const unit_price = Number(it.unit_price ?? it.unitPrice ?? it.price ?? it.selling_price ?? 0) || 0;
+      const quantity = Number(it.quantity ?? it.qty ?? it.units ?? 1) || 1;
+      const name = it.name ?? it.product_name ?? (it.product && (it.product.name || it.product.title)) ?? `Product ${productId}`;
+      const sku = it.sku ?? it.SKU ?? (it.product && it.product.sku) ?? `SKU-${productId}`;
+      const selectedColor = it.selectedColor ?? it.selected_color ?? it.color ?? null;
+      const selectedSize = it.selectedSize ?? it.selected_size ?? it.size ?? null;
+
+      return {
+        product_id: Number(productId),
+        unit_price,
+        quantity,
+        name,
+        sku,
+        selectedColor,
+        selectedSize,
+        raw: it,
+      };
+    });
+
+    // --- prepare Shiprocket payload (use normalized items) ---
     const fullName =
       shippingAddrNormalized.name ||
       req.user?.name ||
       `${req.user?.first_name || ""} ${req.user?.last_name || ""}`.trim() ||
       "Customer";
-
     const nameParts = fullName.trim().split(" ");
     const firstName = nameParts[0] || "Customer";
     const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
-    // ✅ Build Shiprocket payload
     const shiprocketPayload = {
       order_id: `TEMP-${Date.now()}`, // temporary until DB insert
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
@@ -94,51 +129,50 @@ router.post("/place-order", auth, async (req, res) => {
 
       shipping_is_billing: true,
 
-      order_items: items.map((it) => ({
-        name: it.product_name || it.name || `Product ${it.product_id}`,
-        sku: it.sku || `SKU-${it.product_id}`,
-        units: it.quantity,
-        selling_price: it.price,
+      order_items: normalizedItems.map((ni) => ({
+        name: ni.name,
+        sku: ni.sku,
+        units: ni.quantity,
+        selling_price: ni.unit_price,
       })),
 
-      payment_method:
-        paymentMethod?.toUpperCase() === "COD" ? "COD" : "Prepaid",
+      payment_method: paymentMethod?.toUpperCase() === "COD" ? "COD" : "Prepaid",
       sub_total: Number(totalAmount) || 0,
       total_discount: 0,
 
-      // Parcel dimensions (adjust as needed)
+      // Basic dimensions
       length: 15,
       breadth: 10,
       height: 5,
       weight: 1,
     };
 
-    console.log("✅ Shiprocket Payload:", shiprocketPayload);
+    console.log("Shiprocket payload (normalized):", shiprocketPayload);
 
-    // ✅ Step 1: Create Shiprocket order FIRST
+    // --- Step 1: create Shiprocket order first ---
     let srOrder;
     try {
       srOrder = await createOrder(shiprocketPayload);
-      if (!srOrder?.order_id) {
+      if (!srOrder || !srOrder.order_id) {
+        // return shiprocket response so client can inspect details
         return res.status(500).json({
           error: "Shiprocket order creation failed",
-          details: srOrder || "Unknown response from Shiprocket",
+          details: srOrder || "No order_id returned",
         });
       }
     } catch (err) {
-      console.error("⚠️ Shiprocket order creation failed:", err.message);
-      return res.status(500).json({
-        error: "Failed to create Shiprocket order",
-        details: err.message,
-      });
+      console.error("Shiprocket createOrder error:", err);
+      return res.status(500).json({ error: "Shiprocket order creation failed", details: err?.message || String(err) });
     }
 
-    // ✅ Step 2: Only if Shiprocket succeeded → Insert into DB
+    const shiprocketOrderId = srOrder.order_id;
+
+    // --- Step 2: Insert order into DB (after shiprocket success) ---
     await runQuery("BEGIN TRANSACTION");
 
     const orderInsert = await runQuery(
       `INSERT INTO orders 
-       (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, shiprocket_order_id, created_at)
+         (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, shiprocket_order_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', ?, datetime('now','localtime'))`,
       [
         userId,
@@ -147,61 +181,65 @@ router.post("/place-order", auth, async (req, res) => {
         paymentMethod || "",
         JSON.stringify(paymentDetails || {}),
         totalAmount ?? 0,
-        srOrder.order_id,
+        shiprocketOrderId,
       ]
     );
 
     const orderId = orderInsert.lastID;
 
-    // ✅ Step 3: Insert order items
-    for (const it of items) {
+    // --- Step 3: insert normalized items into order_items ---
+    for (const ni of normalizedItems) {
+      const price = Number(ni.unit_price || 0) * Number(ni.quantity || 1);
       await runQuery(
         `INSERT INTO order_items 
-         (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize)
+           (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           orderId,
-          it.product_id,
-          it.quantity,
-          it.price,
-          it.quantity * it.price,
-          it.selectedColor || null,
-          it.selectedSize || null,
+          ni.product_id,
+          ni.quantity,
+          ni.unit_price,
+          price,
+          ni.selectedColor,
+          ni.selectedSize,
         ]
       );
     }
 
     await runQuery("COMMIT");
 
-    // ✅ Step 4: Log user activity (optional)
-    await runQuery(
-      `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
-      [userId, `Placed order #${orderId}`]
-    );
+    // optional: log activity
+    await runQuery(`INSERT INTO user_activity (user_id, action) VALUES (?, ?)`, [
+      userId,
+      `Placed order #${orderId}`,
+    ]);
 
-    // ✅ Step 5: Respond to client
+    // respond with DB + shiprocket info
     return res.json({
       success: true,
-      message: "Order placed successfully",
       orderId,
-      shiprocketOrderId: srOrder.order_id,
+      shiprocketOrderId,
       shiprocket: srOrder,
     });
   } catch (err) {
-    console.error("❌ Order placement error:", err.message);
+    console.error("Place order error:", err);
     try {
       await runQuery("ROLLBACK");
-    } catch (rollbackErr) {
-      console.error("⚠️ Rollback failed:", rollbackErr.message);
+    } catch (rbErr) {
+      console.error("Rollback error:", rbErr);
     }
-    return res.status(500).json({
-      error: "Could not place order",
-      details: err.message,
-    });
+
+    // If item validation error was thrown earlier, surface as 400
+    if (err && /missing product id/i.test(err.message)) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    return res.status(500).json({ error: "Could not place order", details: err?.message || String(err) });
   }
 });
 
 export default router;
+
 
 
 
