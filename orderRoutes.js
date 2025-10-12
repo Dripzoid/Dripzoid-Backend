@@ -47,7 +47,7 @@ router.post("/place-order", auth, async (req, res) => {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-  // Normalize shipping address
+  // ✅ Normalize shipping address
   const shippingAddrNormalized = {
     ...shippingAddress,
     name:
@@ -63,57 +63,20 @@ router.post("/place-order", auth, async (req, res) => {
   };
 
   try {
-    await runQuery("BEGIN TRANSACTION");
-
-    // --- Insert order ---
-    const orderInsert = await runQuery(
-      `INSERT INTO orders 
-       (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', datetime('now','localtime'))`,
-      [
-        userId,
-        shippingAddrNormalized.id ?? null,
-        JSON.stringify(shippingAddrNormalized),
-        paymentMethod || "",
-        JSON.stringify(paymentDetails || {}),
-        totalAmount ?? 0,
-      ]
-    );
-    const orderId = orderInsert.lastID;
-
-    // --- Insert order items ---
-    for (const it of items) {
-      await runQuery(
-        `INSERT INTO order_items 
-         (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          orderId,
-          it.product_id,
-          it.quantity,
-          it.price,
-          it.quantity * it.price,
-          it.selectedColor || null,
-          it.selectedSize || null,
-        ]
-      );
-    }
-
-    await runQuery("COMMIT");
-
-    // --- Parse and split customer name correctly ---
+    // ✅ Parse and split customer name correctly before Shiprocket payload
     const fullName =
       shippingAddrNormalized.name ||
       req.user?.name ||
       `${req.user?.first_name || ""} ${req.user?.last_name || ""}`.trim() ||
       "Customer";
+
     const nameParts = fullName.trim().split(" ");
     const firstName = nameParts[0] || "Customer";
     const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
-    // --- Build Shiprocket payload ---
+    // ✅ Build Shiprocket payload
     const shiprocketPayload = {
-      order_id: `ORD-${orderId}`,
+      order_id: `TEMP-${Date.now()}`, // temporary until DB insert
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
       pickup_location: process.env.SHIPROCKET_PICKUP || "warehouse",
       channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
@@ -143,7 +106,7 @@ router.post("/place-order", auth, async (req, res) => {
       sub_total: Number(totalAmount) || 0,
       total_discount: 0,
 
-      // Basic parcel dimensions
+      // Parcel dimensions (adjust as needed)
       length: 15,
       breadth: 10,
       height: 5,
@@ -152,31 +115,80 @@ router.post("/place-order", auth, async (req, res) => {
 
     console.log("✅ Shiprocket Payload:", shiprocketPayload);
 
-    // --- Push order to Shiprocket ---
-    let srOrder = null;
+    // ✅ Step 1: Create Shiprocket order FIRST
+    let srOrder;
     try {
       srOrder = await createOrder(shiprocketPayload);
-
-      if (srOrder?.order_id) {
-        await runQuery(
-          `UPDATE orders SET shiprocket_order_id = ? WHERE id = ?`,
-          [srOrder.order_id, orderId]
-        );
-      } else {
-        console.warn("⚠️ Shiprocket order returned no order_id:", srOrder);
+      if (!srOrder?.order_id) {
+        return res.status(500).json({
+          error: "Shiprocket order creation failed",
+          details: srOrder || "Unknown response from Shiprocket",
+        });
       }
     } catch (err) {
       console.error("⚠️ Shiprocket order creation failed:", err.message);
-      // keep local order even if Shiprocket API fails
+      return res.status(500).json({
+        error: "Failed to create Shiprocket order",
+        details: err.message,
+      });
     }
 
+    // ✅ Step 2: Only if Shiprocket succeeded → Insert into DB
+    await runQuery("BEGIN TRANSACTION");
+
+    const orderInsert = await runQuery(
+      `INSERT INTO orders 
+       (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, shiprocket_order_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', ?, datetime('now','localtime'))`,
+      [
+        userId,
+        shippingAddrNormalized.id ?? null,
+        JSON.stringify(shippingAddrNormalized),
+        paymentMethod || "",
+        JSON.stringify(paymentDetails || {}),
+        totalAmount ?? 0,
+        srOrder.order_id,
+      ]
+    );
+
+    const orderId = orderInsert.lastID;
+
+    // ✅ Step 3: Insert order items
+    for (const it of items) {
+      await runQuery(
+        `INSERT INTO order_items 
+         (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          orderId,
+          it.product_id,
+          it.quantity,
+          it.price,
+          it.quantity * it.price,
+          it.selectedColor || null,
+          it.selectedSize || null,
+        ]
+      );
+    }
+
+    await runQuery("COMMIT");
+
+    // ✅ Step 4: Log user activity (optional)
+    await runQuery(
+      `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
+      [userId, `Placed order #${orderId}`]
+    );
+
+    // ✅ Step 5: Respond to client
     return res.json({
       success: true,
+      message: "Order placed successfully",
       orderId,
-      shiprocket: srOrder || null,
+      shiprocketOrderId: srOrder.order_id,
+      shiprocket: srOrder,
     });
   } catch (err) {
-    console.error("❌ Order insert error:", err.message);
+    console.error("❌ Order placement error:", err.message);
     try {
       await runQuery("ROLLBACK");
     } catch (rollbackErr) {
@@ -190,6 +202,7 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
 
