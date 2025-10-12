@@ -5,10 +5,10 @@ import db from "./db.js"; // sqlite3 db instance
 const router = express.Router();
 
 /**
- * GET /api/products
+ * GET /api/featured
  * Optional query: ?featured=true
  */
-router.get("/products", (req, res) => {
+router.get("/featured", (req, res) => {
   const isFeatured = req.query.featured === "true"; // Convert to boolean
 
   let sql;
@@ -36,4 +36,5 @@ router.get("/products", (req, res) => {
 });
 
 export default router;
+
 
