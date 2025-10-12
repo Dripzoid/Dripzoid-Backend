@@ -47,12 +47,23 @@ router.get("/", auth, async (req, res) => {
   }
 });
 
-// 📌 Add new address
+// 📌 Add new address (includes name)
 router.post("/", auth, async (req, res) => {
   try {
-    const { label, line1, line2, city, state, pincode, country, phone, is_default } = req.body;
+    const {
+      name,
+      label,
+      line1,
+      line2,
+      city,
+      state,
+      pincode,
+      country,
+      phone,
+      is_default,
+    } = req.body;
 
-    if (!line1 || !city || !state || !pincode) {
+    if (!name || !line1 || !city || !state || !pincode) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
@@ -63,9 +74,21 @@ router.post("/", auth, async (req, res) => {
 
     const result = await runQuery(
       `INSERT INTO addresses 
-        (user_id, label, line1, line2, city, state, pincode, country, phone, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.user.id, label, line1, line2, city, state, pincode, country || "India", phone, is_default ? 1 : 0]
+        (user_id, name, label, line1, line2, city, state, pincode, country, phone, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        req.user.id,
+        name,
+        label,
+        line1,
+        line2,
+        city,
+        state,
+        pincode,
+        country || "India",
+        phone,
+        is_default ? 1 : 0,
+      ]
     );
 
     const newAddress = await getQuery("SELECT * FROM addresses WHERE id = ?", [result.lastID]);
@@ -75,11 +98,26 @@ router.post("/", auth, async (req, res) => {
   }
 });
 
-// 📌 Update address
+// 📌 Update address (includes name)
 router.put("/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { label, line1, line2, city, state, pincode, country, phone, is_default } = req.body;
+    const {
+      name,
+      label,
+      line1,
+      line2,
+      city,
+      state,
+      pincode,
+      country,
+      phone,
+      is_default,
+    } = req.body;
+
+    if (!name || !line1 || !city || !state || !pincode) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
 
     // If this is being marked as default, reset all others for this user
     if (is_default) {
@@ -88,9 +126,22 @@ router.put("/:id", auth, async (req, res) => {
 
     const result = await runQuery(
       `UPDATE addresses 
-       SET label=?, line1=?, line2=?, city=?, state=?, pincode=?, country=?, phone=?, is_default=?
+       SET name=?, label=?, line1=?, line2=?, city=?, state=?, pincode=?, country=?, phone=?, is_default=?
        WHERE id=? AND user_id=?`,
-      [label, line1, line2, city, state, pincode, country || "India", phone, is_default ? 1 : 0, id, req.user.id]
+      [
+        name,
+        label,
+        line1,
+        line2,
+        city,
+        state,
+        pincode,
+        country || "India",
+        phone,
+        is_default ? 1 : 0,
+        id,
+        req.user.id,
+      ]
     );
 
     if (result.changes === 0) {
@@ -137,6 +188,3 @@ router.get("/default", auth, async (req, res) => {
 });
 
 export default router;
-
-
-
