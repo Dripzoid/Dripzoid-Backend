@@ -34,6 +34,7 @@ function allQuery(sql, params = []) {
 
 // 🚀 Place Order Route
 // Place Order (corrected - robust item normalization + Shiprocket-first + DB insert)
+// 🚀 Place Order Route with Serviceability
 router.post("/place-order", auth, async (req, res) => {
   const {
     cartItems = [],
@@ -64,7 +65,7 @@ router.post("/place-order", auth, async (req, res) => {
   };
 
   try {
-    // --- normalize and validate items ---
+    // Validate items
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "No items provided" });
     }
@@ -78,7 +79,7 @@ router.post("/place-order", auth, async (req, res) => {
         null;
 
       if (!productId) {
-        throw new Error(`Item at index ${idx} missing product id (product_id/productId/id/product.id)`);
+        throw new Error(`Item at index ${idx} missing product id`);
       }
 
       const unit_price = Number(it.unit_price ?? it.unitPrice ?? it.price ?? it.selling_price ?? 0) || 0;
@@ -100,7 +101,23 @@ router.post("/place-order", auth, async (req, res) => {
       };
     });
 
-    // --- prepare Shiprocket payload (use normalized items) ---
+    // --- Step 0: Check serviceability for delivery ---
+    let deliveryDate = null;
+    try {
+      const serviceability = await checkServiceability(shippingAddrNormalized.pincode, {
+        weight: normalizedItems.reduce((sum, ni) => sum + (ni.weight || 1), 0),
+      });
+
+      // Pick first courier with ETD
+      if (serviceability.length > 0) {
+        const firstCourier = serviceability[0];
+        deliveryDate = firstCourier.etd; // ETD from Shiprocket
+      }
+    } catch (svcErr) {
+      console.warn("Serviceability check failed, continuing without delivery date:", svcErr.message);
+    }
+
+    // --- Step 1: prepare Shiprocket payload ---
     const fullName =
       shippingAddrNormalized.name ||
       req.user?.name ||
@@ -111,7 +128,7 @@ router.post("/place-order", auth, async (req, res) => {
     const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
     const shiprocketPayload = {
-      order_id: `TEMP-${Date.now()}`, // temporary until DB insert
+      order_id: `TEMP-${Date.now()}`,
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
       pickup_location: process.env.SHIPROCKET_PICKUP || "warehouse",
       channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
@@ -140,25 +157,18 @@ router.post("/place-order", auth, async (req, res) => {
       sub_total: Number(totalAmount) || 0,
       total_discount: 0,
 
-      // Basic dimensions
       length: 15,
       breadth: 10,
       height: 5,
       weight: 1,
     };
 
-    console.log("Shiprocket payload (normalized):", shiprocketPayload);
-
-    // --- Step 1: create Shiprocket order first ---
+    // --- Step 2: Create Shiprocket order ---
     let srOrder;
     try {
       srOrder = await createOrder(shiprocketPayload);
       if (!srOrder || !srOrder.order_id) {
-        // return shiprocket response so client can inspect details
-        return res.status(500).json({
-          error: "Shiprocket order creation failed",
-          details: srOrder || "No order_id returned",
-        });
+        return res.status(500).json({ error: "Shiprocket order creation failed", details: srOrder });
       }
     } catch (err) {
       console.error("Shiprocket createOrder error:", err);
@@ -167,13 +177,13 @@ router.post("/place-order", auth, async (req, res) => {
 
     const shiprocketOrderId = srOrder.order_id;
 
-    // --- Step 2: Insert order into DB (after shiprocket success) ---
+    // --- Step 3: Insert order into DB ---
     await runQuery("BEGIN TRANSACTION");
 
     const orderInsert = await runQuery(
       `INSERT INTO orders 
-         (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, shiprocket_order_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', ?, datetime('now','localtime'))`,
+         (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, shiprocket_order_id, delivery_date, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', ?, ?, datetime('now','localtime'))`,
       [
         userId,
         shippingAddrNormalized.id ?? null,
@@ -182,43 +192,35 @@ router.post("/place-order", auth, async (req, res) => {
         JSON.stringify(paymentDetails || {}),
         totalAmount ?? 0,
         shiprocketOrderId,
+        deliveryDate ?? null,
       ]
     );
 
     const orderId = orderInsert.lastID;
 
-    // --- Step 3: insert normalized items into order_items ---
     for (const ni of normalizedItems) {
       const price = Number(ni.unit_price || 0) * Number(ni.quantity || 1);
       await runQuery(
         `INSERT INTO order_items 
            (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          orderId,
-          ni.product_id,
-          ni.quantity,
-          ni.unit_price,
-          price,
-          ni.selectedColor,
-          ni.selectedSize,
-        ]
+        [orderId, ni.product_id, ni.quantity, ni.unit_price, price, ni.selectedColor, ni.selectedSize]
       );
     }
 
     await runQuery("COMMIT");
 
-    // optional: log activity
+    // Log user activity
     await runQuery(`INSERT INTO user_activity (user_id, action) VALUES (?, ?)`, [
       userId,
       `Placed order #${orderId}`,
     ]);
 
-    // respond with DB + shiprocket info
     return res.json({
       success: true,
       orderId,
       shiprocketOrderId,
+      deliveryDate,
       shiprocket: srOrder,
     });
   } catch (err) {
@@ -229,7 +231,6 @@ router.post("/place-order", auth, async (req, res) => {
       console.error("Rollback error:", rbErr);
     }
 
-    // If item validation error was thrown earlier, surface as 400
     if (err && /missing product id/i.test(err.message)) {
       return res.status(400).json({ error: err.message });
     }
@@ -239,6 +240,7 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
 
