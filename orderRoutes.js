@@ -2,7 +2,7 @@
 import express from "express";
 import db from "./db.js";
 import { auth } from "./auth.js";
-import { createOrder } from "./shiprocket.js";
+import { createOrder, checkServiceability } from "./shiprocket.js";
 
 const router = express.Router();
 
@@ -240,6 +240,7 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
 
