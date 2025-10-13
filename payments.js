@@ -4,31 +4,22 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import Razorpay from "razorpay";
 import db from "./db.js";
-import { createOrder as createShiprocketOrder, checkServiceability } from "./shiprocket.js"; // added checkServiceability
+import { createOrder as createShiprocketOrder, checkServiceability } from "./shiprocket.js";
 
 const router = express.Router();
 
-// --- Encryption helpers ---
+// --- Encryption helpers (kept as-is) ---
 const ENC_KEY = process.env.ENC_KEY || "12345678901234567890123456789012"; // 32 chars
 const IV = process.env.IV || "1234567890123456"; // 16 chars
 
 function encrypt(text) {
-  const cipher = crypto.createCipheriv(
-    "aes-256-cbc",
-    Buffer.from(ENC_KEY),
-    Buffer.from(IV)
-  );
+  const cipher = crypto.createCipheriv("aes-256-cbc", Buffer.from(ENC_KEY), Buffer.from(IV));
   let encrypted = cipher.update(text, "utf8", "hex");
   encrypted += cipher.final("hex");
   return encrypted;
 }
-
 function decrypt(text) {
-  const decipher = crypto.createDecipheriv(
-    "aes-256-cbc",
-    Buffer.from(ENC_KEY),
-    Buffer.from(IV)
-  );
+  const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(ENC_KEY), Buffer.from(IV));
   let decrypted = decipher.update(text, "hex", "utf8");
   decrypted += decipher.final("utf8");
   return decrypted;
@@ -37,9 +28,7 @@ function decrypt(text) {
 // --- Middleware: Auth ---
 function auth(req, res, next) {
   const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ")
-    ? authHeader.split(" ")[1]
-    : null;
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
   if (!token) return res.status(401).json({ error: "No token" });
 
   try {
@@ -64,6 +53,7 @@ const razorpay = new Razorpay({
 });
 
 // ---------------- TABLES ----------------
+// ensure delivery_date column exists (text)
 db.run(
   `CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +112,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
   const amountPaise = Math.round(totalAmtNumber * 100);
 
   try {
-    // --- Prepare Shiprocket Payload ---
+    // Normalize shipping/address
     const address = shipping || {};
     const userName =
       address.name ||
@@ -131,20 +121,36 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       `${req.user?.first_name || ""} ${req.user?.last_name || ""}`.trim() ||
       "Customer";
 
-    const nameParts = userName.split(" ");
+    const nameParts = userName.trim().split(/\s+/);
     const firstName = nameParts[0] || "Customer";
     const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
-    // --- Fetch delivery date using serviceability ---
+    // --- Compute weight (fallback to 1 per item) and call checkServiceability ---
     let deliveryDate = null;
     try {
-      const serviceability = await checkServiceability(address.pincode || "000000");
-      // Assume serviceability returns { estimated_delivery: "YYYY-MM-DD" }
-      deliveryDate = serviceability?.estimated_delivery || null;
+      const totalWeight = items.reduce((s, it) => s + (Number(it.weight || it.wt || 1) || 1), 0);
+      // checkServiceability returns array of couriers in your place-order implementation.
+      // We call it with similar options as place-order.
+      const svc = await checkServiceability(address.pincode || address.pincode?.toString() || "000000", {
+        weight: totalWeight,
+      });
+
+      // svc expected to be an array of courier objects (as in place-order)
+      if (Array.isArray(svc) && svc.length > 0) {
+        // pick first courier's ETD — this matches place-order behavior
+        const first = svc[0];
+        // first.etd may be string like "2-3 days" — we store it raw so frontend can display
+        deliveryDate = first.etd ?? first.estimated_delivery ?? null;
+      } else if (svc && (svc.etd || svc.estimated_delivery)) {
+        deliveryDate = svc.etd ?? svc.estimated_delivery;
+      }
     } catch (err) {
-      console.warn("Serviceability check failed:", err.message);
+      // Non-fatal — continue without delivery date
+      console.warn("Serviceability check failed in payments.create-order:", err?.message || err);
+      deliveryDate = null;
     }
 
+    // --- Prepare Shiprocket payload (same shape as place-order) ---
     const shiprocketPayload = {
       order_id: `TEMP-${Date.now()}`,
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
@@ -175,7 +181,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       length: 10,
       breadth: 10,
       height: 10,
-      weight: 0.5,
+      weight: Math.max(0.5, items.reduce((s, it) => s + (Number(it.weight || 0) || 0), 0) || 0.5),
     };
 
     // --- Create Shiprocket order first ---
@@ -189,18 +195,18 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
         });
       }
     } catch (err) {
-      console.error("⚠️ Shiprocket createOrder failed:", err.message);
-      return res.status(500).json({ error: "Shiprocket order creation failed", details: err.message });
+      console.error("⚠️ Shiprocket createOrder failed in payments.create-order:", err?.message || err);
+      return res.status(500).json({ error: "Shiprocket order creation failed", details: err?.message || String(err) });
     }
 
     const shiprocketOrderId = shiprocketOrder.order_id;
 
-    // --- Insert order into DB ---
+    // --- Insert order into DB (store delivery_date) ---
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO orders (user_id, shipping_json, total_amount, status, shiprocket_order_id, delivery_date) 
          VALUES (?, ?, ?, 'Pending', ?, ?)`,
-        [req.user.id, JSON.stringify(shipping || {}), totalAmtNumber, shiprocketOrderId, deliveryDate],
+        [req.user.id, JSON.stringify(address || {}), totalAmtNumber, shiprocketOrderId, deliveryDate],
         function (err) {
           if (err) return reject(err);
           resolve({ id: this.lastID });
@@ -268,6 +274,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       );
     });
 
+    // --- Return response including deliveryDate (if any) ---
     res.json({
       success: true,
       internalOrderId: orderResult.id,
@@ -275,14 +282,13 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       amount: razorOrder.amount,
       currency: razorOrder.currency,
       shiprocketOrderId,
-      deliveryDate, // added here
+      deliveryDate: deliveryDate ?? null,
     });
   } catch (err) {
-    console.error("Create order error:", err.message);
-    res.status(500).json({ error: "Failed to create order", details: err.message });
+    console.error("Create order error (payments.create-order):", err?.message || err);
+    res.status(500).json({ error: "Failed to create order", details: err?.message || String(err) });
   }
 });
-
 
 // ---------------- VERIFY RAZORPAY PAYMENT ----------------
 router.post("/razorpay/verify", auth, async (req, res) => {
@@ -301,7 +307,7 @@ router.post("/razorpay/verify", auth, async (req, res) => {
       return res.status(400).json({ error: "Signature verification failed" });
     }
 
-    // Update order status to Confirmed
+    // Update order status to Confirmed and set payment id
     await new Promise((resolve, reject) => {
       db.run(
         `UPDATE orders 
@@ -328,22 +334,18 @@ router.post("/razorpay/verify", auth, async (req, res) => {
       );
     });
 
-    // Fetch delivery date from DB
+    // Fetch delivery_date from DB and return it
     const deliveryDate = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT delivery_date FROM orders WHERE id = ?`,
-        [internalOrderId],
-        (err, row) => {
-          if (err) return reject(err);
-          resolve(row?.delivery_date || null);
-        }
-      );
+      db.get(`SELECT delivery_date FROM orders WHERE id = ?`, [internalOrderId], (err, row) => {
+        if (err) return reject(err);
+        resolve(row?.delivery_date ?? null);
+      });
     });
 
     res.json({ success: true, internalOrderId, razorpay_payment_id, deliveryDate });
   } catch (err) {
-    console.error("Razorpay verify error:", err.message);
-    res.status(500).json({ error: "Failed to verify payment", details: err.message });
+    console.error("Razorpay verify error:", err?.message || err);
+    res.status(500).json({ error: "Failed to verify payment", details: err?.message || String(err) });
   }
 });
 
