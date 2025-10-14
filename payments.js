@@ -8,7 +8,7 @@ import { createOrder as createShiprocketOrder, checkServiceability } from "./shi
 
 const router = express.Router();
 
-// --- Encryption helpers (kept as-is) ---
+// --- Encryption helpers ---
 const ENC_KEY = process.env.ENC_KEY || "12345678901234567890123456789012"; // 32 chars
 const IV = process.env.IV || "1234567890123456"; // 16 chars
 
@@ -53,7 +53,6 @@ const razorpay = new Razorpay({
 });
 
 // ---------------- TABLES ----------------
-// ensure delivery_date column exists (text)
 db.run(
   `CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +111,6 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
   const amountPaise = Math.round(totalAmtNumber * 100);
 
   try {
-    // Normalize shipping/address
     const address = shipping || {};
     const userName =
       address.name ||
@@ -125,38 +123,21 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
     const firstName = nameParts[0] || "Customer";
     const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
-    // --- Compute weight (fallback to 1 per item) and call checkServiceability ---
     let deliveryDate = null;
     try {
       const totalWeight = items.reduce((s, it) => s + (Number(it.weight || it.wt || 1) || 1), 0);
-      // checkServiceability returns array of couriers in your place-order implementation.
-      // We call it with similar options as place-order.
-      const svc = await checkServiceability(address.pincode || address.pincode?.toString() || "000000", {
-        weight: totalWeight,
-      });
-
-      // svc expected to be an array of courier objects (as in place-order)
-      if (Array.isArray(svc) && svc.length > 0) {
-        // pick first courier's ETD — this matches place-order behavior
-        const first = svc[0];
-        // first.etd may be string like "2-3 days" — we store it raw so frontend can display
-        deliveryDate = first.etd ?? first.estimated_delivery ?? null;
-      } else if (svc && (svc.etd || svc.estimated_delivery)) {
-        deliveryDate = svc.etd ?? svc.estimated_delivery;
-      }
+      const svc = await checkServiceability(address.pincode || "000000", { weight: totalWeight });
+      if (Array.isArray(svc) && svc.length > 0) deliveryDate = svc[0].etd ?? svc[0].estimated_delivery ?? null;
+      else if (svc?.etd || svc?.estimated_delivery) deliveryDate = svc.etd ?? svc.estimated_delivery;
     } catch (err) {
-      // Non-fatal — continue without delivery date
-      console.warn("Serviceability check failed in payments.create-order:", err?.message || err);
-      deliveryDate = null;
+      console.warn("Serviceability check failed:", err?.message || err);
     }
 
-    // --- Prepare Shiprocket payload (same shape as place-order) ---
     const shiprocketPayload = {
       order_id: `TEMP-${Date.now()}`,
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
       pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
       channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
-
       billing_customer_name: firstName,
       billing_last_name: lastName,
       billing_address: address.line1 || address.address || "N/A",
@@ -167,7 +148,6 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       billing_country: address.country || "India",
       billing_email: address.email || req.user?.email || "noreply@example.com",
       billing_phone: address.phone || req.user?.phone || "0000000000",
-
       shipping_is_billing: true,
       order_items: items.map((i) => ({
         name: i.name || `Product ${i.product_id}`,
@@ -184,29 +164,24 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       weight: Math.max(0.5, items.reduce((s, it) => s + (Number(it.weight || 0) || 0), 0) || 0.5),
     };
 
-    // --- Create Shiprocket order first ---
     let shiprocketOrder;
     try {
       shiprocketOrder = await createShiprocketOrder(shiprocketPayload);
       if (!shiprocketOrder?.order_id) {
-        return res.status(500).json({
-          error: "Shiprocket order creation failed",
-          details: shiprocketOrder || "Unknown error",
-        });
+        return res.status(500).json({ error: "Shiprocket order creation failed" });
       }
     } catch (err) {
-      console.error("⚠️ Shiprocket createOrder failed in payments.create-order:", err?.message || err);
+      console.error("Shiprocket createOrder failed:", err?.message || err);
       return res.status(500).json({ error: "Shiprocket order creation failed", details: err?.message || String(err) });
     }
 
     const shiprocketOrderId = shiprocketOrder.order_id;
 
-    // --- Insert order into DB (store delivery_date) ---
     const orderResult = await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO orders (user_id, shipping_json, total_amount, status, shiprocket_order_id, delivery_date) 
          VALUES (?, ?, ?, 'Pending', ?, ?)`,
-        [req.user.id, JSON.stringify(address || {}), totalAmtNumber, shiprocketOrderId, deliveryDate],
+        [req.user.id, JSON.stringify(address), totalAmtNumber, shiprocketOrderId, deliveryDate],
         function (err) {
           if (err) return reject(err);
           resolve({ id: this.lastID });
@@ -214,7 +189,6 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       );
     });
 
-    // --- Insert order items ---
     for (const item of items) {
       const unitPrice = Number(item.unit_price || item.price || 0);
       const quantity = Number(item.quantity || 1);
@@ -240,7 +214,6 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       });
     }
 
-    // --- Create Razorpay order ---
     const razorOrder = await razorpay.orders.create({
       amount: amountPaise,
       currency: "INR",
@@ -248,7 +221,6 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       notes: { internalOrderId: orderResult.id.toString() },
     });
 
-    // --- Update Razorpay details in DB ---
     await new Promise((resolve, reject) => {
       db.run(
         `UPDATE orders 
@@ -262,7 +234,6 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       );
     });
 
-    // --- Log user activity ---
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
@@ -274,7 +245,6 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       );
     });
 
-    // --- Return response including deliveryDate (if any) ---
     res.json({
       success: true,
       internalOrderId: orderResult.id,
@@ -285,7 +255,7 @@ router.post("/razorpay/create-order", auth, async (req, res) => {
       deliveryDate: deliveryDate ?? null,
     });
   } catch (err) {
-    console.error("Create order error (payments.create-order):", err?.message || err);
+    console.error("Create order error:", err?.message || err);
     res.status(500).json({ error: "Failed to create order", details: err?.message || String(err) });
   }
 });
@@ -307,7 +277,7 @@ router.post("/razorpay/verify", auth, async (req, res) => {
       return res.status(400).json({ error: "Signature verification failed" });
     }
 
-    // Update order status to Confirmed and set payment id
+    // --- Update order status to Confirmed ---
     await new Promise((resolve, reject) => {
       db.run(
         `UPDATE orders 
@@ -322,7 +292,30 @@ router.post("/razorpay/verify", auth, async (req, res) => {
       );
     });
 
-    // Insert user activity
+    // --- Increment sold count for each product in order ---
+    const orderItems = await new Promise((resolve, reject) => {
+      db.all(`SELECT product_id, quantity FROM order_items WHERE order_id = ?`, [internalOrderId], (err, rows) => {
+        if (err) return reject(err);
+        resolve(rows || []);
+      });
+    });
+
+    for (const item of orderItems) {
+      await new Promise((resolve, reject) => {
+        db.run(
+          `UPDATE products 
+           SET sold = IFNULL(sold, 0) + ? 
+           WHERE id = ?`,
+          [item.quantity, item.product_id],
+          function (err) {
+            if (err) return reject(err);
+            resolve();
+          }
+        );
+      });
+    }
+
+    // --- Insert user activity ---
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
@@ -334,7 +327,7 @@ router.post("/razorpay/verify", auth, async (req, res) => {
       );
     });
 
-    // Fetch delivery_date from DB and return it
+    // --- Fetch delivery_date ---
     const deliveryDate = await new Promise((resolve, reject) => {
       db.get(`SELECT delivery_date FROM orders WHERE id = ?`, [internalOrderId], (err, row) => {
         if (err) return reject(err);
