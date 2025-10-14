@@ -33,8 +33,6 @@ function allQuery(sql, params = []) {
 }
 
 // 🚀 Place Order Route
-// Place Order (corrected - robust item normalization + Shiprocket-first + DB insert)
-// 🚀 Place Order Route with Serviceability
 router.post("/place-order", auth, async (req, res) => {
   const {
     cartItems = [],
@@ -108,10 +106,9 @@ router.post("/place-order", auth, async (req, res) => {
         weight: normalizedItems.reduce((sum, ni) => sum + (ni.weight || 1), 0),
       });
 
-      // Pick first courier with ETD
       if (serviceability.length > 0) {
         const firstCourier = serviceability[0];
-        deliveryDate = firstCourier.etd; // ETD from Shiprocket
+        deliveryDate = firstCourier.etd;
       }
     } catch (svcErr) {
       console.warn("Serviceability check failed, continuing without delivery date:", svcErr.message);
@@ -132,7 +129,6 @@ router.post("/place-order", auth, async (req, res) => {
       order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
       pickup_location: process.env.SHIPROCKET_PICKUP || "warehouse",
       channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
-
       billing_customer_name: firstName,
       billing_last_name: lastName,
       billing_address: shippingAddrNormalized.line1,
@@ -143,20 +139,16 @@ router.post("/place-order", auth, async (req, res) => {
       billing_country: shippingAddrNormalized.country,
       billing_email: req.user?.email || "noreply@example.com",
       billing_phone: shippingAddrNormalized.phone,
-
       shipping_is_billing: true,
-
       order_items: normalizedItems.map((ni) => ({
         name: ni.name,
         sku: ni.sku,
         units: ni.quantity,
         selling_price: ni.unit_price,
       })),
-
       payment_method: paymentMethod?.toUpperCase() === "COD" ? "COD" : "Prepaid",
       sub_total: Number(totalAmount) || 0,
       total_discount: 0,
-
       length: 15,
       breadth: 10,
       height: 5,
@@ -177,7 +169,7 @@ router.post("/place-order", auth, async (req, res) => {
 
     const shiprocketOrderId = srOrder.order_id;
 
-    // --- Step 3: Insert order into DB ---
+    // --- Step 3: Insert order and items into DB ---
     await runQuery("BEGIN TRANSACTION");
 
     const orderInsert = await runQuery(
@@ -205,6 +197,14 @@ router.post("/place-order", auth, async (req, res) => {
            (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [orderId, ni.product_id, ni.quantity, ni.unit_price, price, ni.selectedColor, ni.selectedSize]
+      );
+
+      // --- Increment sold count in products ---
+      await runQuery(
+        `UPDATE products 
+         SET sold = IFNULL(sold, 0) + ? 
+         WHERE id = ?`,
+        [ni.quantity, ni.product_id]
       );
     }
 
@@ -240,11 +240,3 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
-
-
-
-
-
-
-
-
