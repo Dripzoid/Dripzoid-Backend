@@ -25,7 +25,7 @@ import { auth } from "./auth.js";
 import adminStatsRoutes from "./adminStats.js";
 import orderRoutes from "./orderRoutes.js";
 import uploadRoutes from "./uploadRoutes.js";
-import featuredRoutes from "./featuredRoutes.js";
+import ProductsRoutes from "./ProductsRoutes.js";
 import userOrdersRoutes from "./userOrders.js";
 import addressRoutes from "./address.js";
 import paymentsRouter from "./payments.js";
@@ -1003,7 +1003,7 @@ app.use("/api/user/orders", authenticateToken, userOrdersRoutes);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/account", accountSettingsRoutes);
-app.use("/api/featured", featuredRoutes);
+app.use("/api", ProductsRoutes.js);
 app.use("/api/admin/products", auth, adminProductsRoutes);
 app.use("/api/admin/orders", auth, adminOrdersRoutes);
 app.use("/api/admin", auth, adminStatsRoutes);
@@ -1046,6 +1046,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
