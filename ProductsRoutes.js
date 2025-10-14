@@ -8,7 +8,7 @@ const router = express.Router();
  * GET /api/featured
  * Optional query: ?featured=true
  */
-router.get("/", (req, res) => {
+router.get("/featured", (req, res) => {
   const isFeatured = req.query.featured === "true"; // Convert to boolean
 
   let sql;
@@ -36,6 +36,7 @@ router.get("/", (req, res) => {
 });
 
 export default router;
+
 
 
 
