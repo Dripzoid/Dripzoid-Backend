@@ -1,4 +1,4 @@
-// routes/featuredRoutes.js
+// ProductsRoutes.js
 import express from "express";
 import db from "./db.js"; // sqlite3 db instance
 
@@ -35,8 +35,24 @@ router.get("/featured", (req, res) => {
   });
 });
 
+/**
+ * GET /api/trending
+ * Fetch top 10 sold products
+ */
+router.get("/trending", (req, res) => {
+  const sql = `SELECT id, name, price, images, sold 
+               FROM products 
+               ORDER BY sold DESC 
+               LIMIT 10`;
+
+  db.all(sql, [], (err, rows) => {
+    if (err) {
+      console.error("DB error fetching trending products:", err);
+      return res.status(500).json({ error: err.message });
+    }
+
+    res.json(rows || []);
+  });
+});
+
 export default router;
-
-
-
-
