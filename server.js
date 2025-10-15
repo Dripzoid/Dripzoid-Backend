@@ -37,7 +37,7 @@ import votesRouter from "./votes.js";
 
 import otpRoutes from "./OtpVerification.js";
 
-import shippingRoutes from "./shipping.js"; 
+import shippingRoutes from "./shipping.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,7 +45,7 @@ const __dirname = path.dirname(__filename);
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 const API_BASE = process.env.API_BASE || "http://localhost:5000";
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
-const isProduction = process.env.NODE_ENV === 'production';
+const isProduction = process.env.NODE_ENV === "production";
 
 const app = express();
 
@@ -155,8 +155,8 @@ function getIP(req) {
 const TOKEN_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 180; // 180 days
 const AUTH_COOKIE_OPTIONS = {
   httpOnly: true,
-  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-  secure: process.env.NODE_ENV === "production",
+  sameSite: isProduction ? "none" : "lax",
+  secure: isProduction,
   path: "/",
   maxAge: TOKEN_MAX_AGE_MS,
 };
@@ -219,7 +219,6 @@ function runExecute(sql, params = []) {
     });
   });
 }
-
 
 // -------------------- JWT Middleware --------------------
 
@@ -330,10 +329,10 @@ function issueTokenAndRespond(req, res, userRow, sessionId, message = "Success",
 function createSessionAndRespond(req, res, user, actionLabel) {
   const now = new Date().toISOString(); // current timestamp in ISO format
 
-db.run(
-  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-  [row.id, getDevice(req), getIP(req), now],
-
+  // IMPORTANT: use user.id (not `row.id` which was undefined)
+  db.run(
+    "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+    [user.id, getDevice(req), getIP(req), now],
     function (sessErr) {
       if (sessErr) {
         console.error("Session insert error:", sessErr);
@@ -377,10 +376,10 @@ app.post("/api/register", async (req, res) => {
 
           const now = new Date().toISOString(); // current timestamp in ISO format
 
-db.run(
-  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-  [row.id, getDevice(req), getIP(req), now],
-
+          // Use userRow.id (not row.id)
+          db.run(
+            "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+            [userRow.id, getDevice(req), getIP(req), now],
             function (sessErr) {
               if (sessErr) return res.status(500).json({ message: "Failed to create session" });
               const sessionId = this.lastID;
@@ -413,9 +412,9 @@ app.post("/api/login", (req, res) => {
 
       const now = new Date().toISOString(); // current timestamp in ISO format
 
-db.run(
-  "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
-  [row.id, getDevice(req), getIP(req), now],
+      db.run(
+        "INSERT INTO user_sessions (user_id, device, ip, last_active) VALUES (?, ?, ?, ?)",
+        [row.id, getDevice(req), getIP(req), now],
         function (sessErr) {
           if (sessErr) return res.status(500).json({ message: "Failed to create session" });
           const sessionId = this.lastID;
@@ -603,7 +602,7 @@ app.get("/api/users", async (req, res) => {
           [u.id]
         ),
         runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [u.id]),
-       runGet(`
+        runGet(`
   SELECT 
     SUM(
       oi_sum.order_items_sum - o.total_amount + 
@@ -647,8 +646,6 @@ app.get("/api/users", async (req, res) => {
   }
 });
 
-
-
 /**
  * Get single user by ID
  */
@@ -676,24 +673,23 @@ app.get("/api/users/:id", async (req, res) => {
       couponSavingsRes
     ] = await Promise.all([
       runGet(`SELECT COUNT(*) as count FROM orders WHERE user_id = ?`, [userId]),
-     // Count Delivered orders (case-insensitive)
-runGet(
-  `SELECT COUNT(*) AS count
-   FROM orders
-   WHERE user_id = ?
-     AND LOWER(status) IN ('delivered')`,
-  [userId]
-),
+      // Count Delivered orders (case-insensitive)
+      runGet(
+        `SELECT COUNT(*) AS count
+         FROM orders
+         WHERE user_id = ?
+           AND LOWER(status) IN ('delivered')`,
+        [userId]
+      ),
 
-// Count Cancelled/Returned orders (case-insensitive)
-runGet(
-  `SELECT COUNT(*) AS count
-   FROM orders
-   WHERE user_id = ?
-     AND LOWER(status) IN ('cancelled', 'returned')`,
-  [userId]
-),
-
+      // Count Cancelled/Returned orders (case-insensitive)
+      runGet(
+        `SELECT COUNT(*) AS count
+         FROM orders
+         WHERE user_id = ?
+           AND LOWER(status) IN ('cancelled', 'returned')`,
+        [userId]
+      ),
 
       runGet(`SELECT SUM(total_amount) as total FROM orders WHERE user_id = ?`, [userId]),
       runGet(`
@@ -705,14 +701,19 @@ runGet(
         [userId]
       )
     ]);
-  const inProgressOrders = totalOrders - (successfulOrders + cancelledOrders);
+
+    const totalOrders = totalOrdersRes?.count ?? 0;
+    const successfulOrders = successfulOrdersRes?.count ?? 0;
+    const cancelledOrders = cancelledOrdersRes?.count ?? 0;
+    const inProgressOrders = totalOrders - (successfulOrders + cancelledOrders);
+
     const enrichedUser = {
       ...user,
       role: user.is_admin === 1 ? "admin" : "customer",
-      totalOrders: totalOrdersRes?.count ?? 0,
-      successfulOrders: successfulOrdersRes?.count ?? 0,
-      cancelledOrders: cancelledOrdersRes?.count ?? 0,
-      inProgressOrders: inProgressOrdersRes?.count ?? 0,
+      totalOrders: totalOrders,
+      successfulOrders: successfulOrders,
+      cancelledOrders: cancelledOrders,
+      inProgressOrders: inProgressOrders,
       totalSpend: totalSpendRes?.total ?? 0,
       couponSavings: couponSavingsRes?.savings ?? 0,
     };
@@ -723,7 +724,6 @@ runGet(
     res.status(500).json({ error: "Failed to fetch user" });
   }
 });
-
 
 /**
  * Update user (role, status, etc.)
@@ -826,7 +826,6 @@ app.post("/api/account/signout-session", authenticateToken, (req, res) => {
     return res.status(500).json({ message: "Signout failed" });
   }
 });
-
 
 // Logout all sessions for current user
 app.post("/api/logout-all", authenticateToken, (req, res) => {
@@ -947,7 +946,6 @@ app.get("/api/admin/data-export", auth, (req, res) => {
 
 // --- DB upload route ---
 
-
 const upload = multer({ dest: "/tmp/" });
 
 app.post("/api/upload-db", upload.single("dbfile"), (req, res) => {
@@ -989,9 +987,6 @@ app.post("/api/upload-db", upload.single("dbfile"), (req, res) => {
     return res.status(500).json({ message: "Failed to replace DB" });
   }
 });
-
-
-
 
 // -------------------- Mount Other Routes --------------------
 app.use("/api/wishlist", wishlistRoutes);
@@ -1046,43 +1041,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
