@@ -21,6 +21,7 @@
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "pdfkit": "^0.13.0",
+    "sqlite": "^5.1.1",
     "sqlite3": "^5.1.6",
     "streamifier": "^0.1.1",
     "ua-parser-js": "^1.0.37",
