@@ -21,6 +21,7 @@ import wishlistRoutes from "./wishlist.js";
 import productsRouter from "./products.js";
 import cartRouter from "./cart.js";
 import adminProductsRoutes from "./adminProducts.js";
+import SalesAndSlidesRoutes from "./SalesAndSlides.js";
 import { auth } from "./auth.js";
 import adminStatsRoutes from "./adminStats.js";
 import orderRoutes from "./orderRoutes.js";
@@ -1002,6 +1003,7 @@ app.use("/api", ProductsRoutes);
 app.use("/api/admin/products", auth, adminProductsRoutes);
 app.use("/api/admin/orders", auth, adminOrdersRoutes);
 app.use("/api/admin", auth, adminStatsRoutes);
+app.use("/api/admin", SalesAndSlidesRoutes);
 app.use("/api/reviews", reviewsRouter);
 app.use("/api/qa", qaRouter);
 app.use("/api/votes", votesRouter);
@@ -1041,3 +1043,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
