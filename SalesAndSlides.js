@@ -1,13 +1,13 @@
 // routes/SalesAndSlides.js
 import express from "express";
 import multer from "multer";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
 import path from "path";
 import fs from "fs";
-import authAdmin from "./authAdmin.js"; // ✅ Admin auth middleware
 import dotenv from "dotenv";
 import { v2 as cloudinary } from "cloudinary";
+
+import db from "./db.js"; // ✅ Use centralized db connection
+import authAdmin from "./authAdmin.js"; // ✅ Admin auth middleware
 
 dotenv.config();
 
@@ -23,17 +23,6 @@ cloudinary.config({
 });
 
 // =============================
-// SQLite Connection
-// =============================
-let db;
-(async () => {
-  db = await open({
-    filename: path.join(process.cwd(), "database.sqlite"),
-    driver: sqlite3.Database,
-  });
-})();
-
-// =============================
 // Multer Setup (for image uploads)
 // =============================
 const storage = multer.diskStorage({
@@ -45,12 +34,18 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+// =============================
 // Utility: Audit Logger
+// =============================
 async function logAction(admin_id, action_type, entity_type, entity_id, details = {}) {
-  await db.run(
-    `INSERT INTO audit_log (admin_id, action_type, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)`,
-    [admin_id, action_type, entity_type, entity_id, JSON.stringify(details)]
-  );
+  try {
+    await db.run(
+      `INSERT INTO audit_log (admin_id, action_type, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)`,
+      [admin_id, action_type, entity_type, entity_id, JSON.stringify(details)]
+    );
+  } catch (err) {
+    console.error("Audit log error:", err.message);
+  }
 }
 
 // =============================
@@ -64,7 +59,7 @@ router.post("/upload", authAdmin, upload.single("image"), async (req, res) => {
       folder: "slides",
     });
 
-    // remove local file
+    // remove local temp file
     fs.unlinkSync(req.file.path);
 
     res.json({ url: uploadResult.secure_url });
@@ -80,10 +75,18 @@ router.post("/upload", authAdmin, upload.single("image"), async (req, res) => {
 
 // GET all slides
 router.get("/slides", authAdmin, async (req, res) => {
-  const slides = await db.all(
-    `SELECT * FROM slides WHERE is_deleted = 0 ORDER BY order_index ASC`
-  );
-  res.json(slides);
+  try {
+    const slides = await new Promise((resolve, reject) => {
+      db.all(
+        `SELECT * FROM slides WHERE is_deleted = 0 ORDER BY order_index ASC`,
+        (err, rows) => (err ? reject(err) : resolve(rows))
+      );
+    });
+    res.json(slides);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch slides" });
+  }
 });
 
 // ADD new slide
@@ -93,13 +96,15 @@ router.post("/slides", authAdmin, async (req, res) => {
     if (!name || !image_url)
       return res.status(400).json({ error: "Name and image_url are required" });
 
-    const { lastID } = await db.run(
+    db.run(
       `INSERT INTO slides (name, image_url, link) VALUES (?, ?, ?)`,
-      [name, image_url, link]
+      [name, image_url, link],
+      async function (err) {
+        if (err) return res.status(500).json({ error: err.message });
+        await logAction(req.user.id, "CREATE", "slide", this.lastID, { name, image_url });
+        res.json({ message: "Slide added successfully", id: this.lastID });
+      }
     );
-
-    await logAction(req.user.id, "CREATE", "slide", lastID, { name, image_url });
-    res.json({ message: "Slide added successfully", id: lastID });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to add slide" });
@@ -112,13 +117,17 @@ router.put("/slides/:id", authAdmin, async (req, res) => {
     const { name, image_url, link, order_index } = req.body;
     const { id } = req.params;
 
-    await db.run(
-      `UPDATE slides SET name = ?, image_url = ?, link = ?, order_index = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      [name, image_url, link, order_index, id]
+    db.run(
+      `UPDATE slides 
+       SET name = ?, image_url = ?, link = ?, order_index = ?, updated_at = CURRENT_TIMESTAMP 
+       WHERE id = ?`,
+      [name, image_url, link, order_index, id],
+      async function (err) {
+        if (err) return res.status(500).json({ error: err.message });
+        await logAction(req.user.id, "UPDATE", "slide", id, { name, image_url });
+        res.json({ message: "Slide updated successfully" });
+      }
     );
-
-    await logAction(req.user.id, "UPDATE", "slide", id, { name, image_url });
-    res.json({ message: "Slide updated successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to update slide" });
   }
@@ -128,9 +137,11 @@ router.put("/slides/:id", authAdmin, async (req, res) => {
 router.delete("/slides/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    await db.run(`UPDATE slides SET is_deleted = 1 WHERE id = ?`, [id]);
-    await logAction(req.user.id, "DELETE", "slide", id);
-    res.json({ message: "Slide deleted (soft) successfully" });
+    db.run(`UPDATE slides SET is_deleted = 1 WHERE id = ?`, [id], async function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      await logAction(req.user.id, "DELETE", "slide", id);
+      res.json({ message: "Slide deleted (soft) successfully" });
+    });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete slide" });
   }
@@ -142,8 +153,14 @@ router.delete("/slides/:id", authAdmin, async (req, res) => {
 
 // GET all sales
 router.get("/sales", authAdmin, async (req, res) => {
-  const sales = await db.all(`SELECT * FROM sales WHERE is_deleted = 0`);
-  res.json(sales);
+  try {
+    db.all(`SELECT * FROM sales WHERE is_deleted = 0`, (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch sales" });
+  }
 });
 
 // CREATE sale
@@ -152,28 +169,35 @@ router.post("/sales", authAdmin, async (req, res) => {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: "Sale name required" });
 
-    const { lastID } = await db.run(`INSERT INTO sales (name) VALUES (?)`, [name]);
-    await logAction(req.user.id, "CREATE", "sale", lastID, { name });
-    res.json({ message: "Sale created successfully", id: lastID });
+    db.run(`INSERT INTO sales (name) VALUES (?)`, [name], async function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      await logAction(req.user.id, "CREATE", "sale", this.lastID, { name });
+      res.json({ message: "Sale created successfully", id: this.lastID });
+    });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Failed to create sale" });
   }
 });
 
-// UPDATE sale (enable/disable or rename)
+// UPDATE sale
 router.put("/sales/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, enabled } = req.body;
 
-    await db.run(
-      `UPDATE sales SET name = COALESCE(?, name), enabled = COALESCE(?, enabled), updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      [name, enabled, id]
+    db.run(
+      `UPDATE sales 
+       SET name = COALESCE(?, name), 
+           enabled = COALESCE(?, enabled), 
+           updated_at = CURRENT_TIMESTAMP 
+       WHERE id = ?`,
+      [name, enabled, id],
+      async function (err) {
+        if (err) return res.status(500).json({ error: err.message });
+        await logAction(req.user.id, "UPDATE", "sale", id, { name, enabled });
+        res.json({ message: "Sale updated successfully" });
+      }
     );
-
-    await logAction(req.user.id, "UPDATE", "sale", id, { name, enabled });
-    res.json({ message: "Sale updated successfully" });
   } catch (err) {
     res.status(500).json({ error: "Failed to update sale" });
   }
@@ -183,9 +207,11 @@ router.put("/sales/:id", authAdmin, async (req, res) => {
 router.delete("/sales/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    await db.run(`UPDATE sales SET is_deleted = 1 WHERE id = ?`, [id]);
-    await logAction(req.user.id, "DELETE", "sale", id);
-    res.json({ message: "Sale soft-deleted successfully" });
+    db.run(`UPDATE sales SET is_deleted = 1 WHERE id = ?`, [id], async function (err) {
+      if (err) return res.status(500).json({ error: err.message });
+      await logAction(req.user.id, "DELETE", "sale", id);
+      res.json({ message: "Sale soft-deleted successfully" });
+    });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete sale" });
   }
@@ -195,7 +221,7 @@ router.delete("/sales/:id", authAdmin, async (req, res) => {
 // SALE PRODUCTS MANAGEMENT
 // =============================
 
-// Add product(s) to sale
+// Add products to sale
 router.post("/sales/:sale_id/products", authAdmin, async (req, res) => {
   try {
     const { sale_id } = req.params;
@@ -204,14 +230,13 @@ router.post("/sales/:sale_id/products", authAdmin, async (req, res) => {
     if (!Array.isArray(product_ids) || product_ids.length === 0)
       return res.status(400).json({ error: "No products provided" });
 
-    const insertPromises = product_ids.map((pid, idx) =>
-      db.run(
-        `INSERT OR IGNORE INTO sale_products (sale_id, product_id, position) VALUES (?, ?, ?)`,
-        [sale_id, pid, idx]
-      )
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO sale_products (sale_id, product_id, position) VALUES (?, ?, ?)`
     );
 
-    await Promise.all(insertPromises);
+    product_ids.forEach((pid, idx) => insert.run([sale_id, pid, idx]));
+    insert.finalize();
+
     await logAction(req.user.id, "CREATE", "sale_product", sale_id, { product_ids });
     res.json({ message: "Products added to sale successfully" });
   } catch (err) {
@@ -224,12 +249,15 @@ router.post("/sales/:sale_id/products", authAdmin, async (req, res) => {
 router.delete("/sales/:sale_id/products/:product_id", authAdmin, async (req, res) => {
   try {
     const { sale_id, product_id } = req.params;
-    await db.run(`DELETE FROM sale_products WHERE sale_id = ? AND product_id = ?`, [
-      sale_id,
-      product_id,
-    ]);
-    await logAction(req.user.id, "DELETE", "sale_product", sale_id, { product_id });
-    res.json({ message: "Product removed from sale" });
+    db.run(
+      `DELETE FROM sale_products WHERE sale_id = ? AND product_id = ?`,
+      [sale_id, product_id],
+      async function (err) {
+        if (err) return res.status(500).json({ error: err.message });
+        await logAction(req.user.id, "DELETE", "sale_product", sale_id, { product_id });
+        res.json({ message: "Product removed from sale" });
+      }
+    );
   } catch (err) {
     res.status(500).json({ error: "Failed to remove product" });
   }
@@ -241,19 +269,23 @@ router.delete("/sales/:sale_id/products/:product_id", authAdmin, async (req, res
 router.get("/sales/:id/details", authAdmin, async (req, res) => {
   const { id } = req.params;
   try {
-    const sale = await db.get(`SELECT * FROM sales WHERE id = ?`, [id]);
-    if (!sale) return res.status(404).json({ error: "Sale not found" });
+    db.get(`SELECT * FROM sales WHERE id = ?`, [id], (err, sale) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!sale) return res.status(404).json({ error: "Sale not found" });
 
-    const products = await db.all(
-      `SELECT p.id, p.name, p.price, sp.position
-       FROM sale_products sp
-       JOIN products p ON p.id = sp.product_id
-       WHERE sp.sale_id = ?
-       ORDER BY sp.position ASC`,
-      [id]
-    );
-
-    res.json({ sale, products });
+      db.all(
+        `SELECT p.id, p.name, p.price, sp.position
+         FROM sale_products sp
+         JOIN products p ON p.id = sp.product_id
+         WHERE sp.sale_id = ?
+         ORDER BY sp.position ASC`,
+        [id],
+        (err2, products) => {
+          if (err2) return res.status(500).json({ error: err2.message });
+          res.json({ sale, products });
+        }
+      );
+    });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch sale details" });
   }
