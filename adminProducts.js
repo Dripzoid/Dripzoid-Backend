@@ -12,7 +12,6 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const router = express.Router();
 
 // Use DATABASE_FILE from .env or fallback to local file
@@ -20,127 +19,136 @@ const dbPath = process.env.DATABASE_FILE || path.resolve(__dirname, "./dripzoid.
 
 // SQLite connection
 const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error("❌ SQLite connection error:", err.message);
-  } else {
-    console.log("✅ Connected to SQLite at:", dbPath);
-  }
+  if (err) console.error("❌ SQLite connection error:", err.message);
+  else console.log("✅ Connected to SQLite at:", dbPath);
 });
 
-// Multer config
+// Multer config for uploads
 const uploadsDir = path.resolve(__dirname, "../uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const upload = multer({ dest: uploadsDir });
 
-/* -------------------------------------------------------------------------- */
-/*                            Helper: parseSizeStock                          */
-/* -------------------------------------------------------------------------- */
+/* ----------------------------- helpers ---------------------------------- */
+
+// parse size_stock input. Accepts object, JSON string, or "S:10,M:5" style.
 function parseSizeStock(input) {
   if (!input) return {};
   if (typeof input === "object") return input;
-
   try {
     const parsed = JSON.parse(input);
     if (typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-  } catch {}
-
+  } catch (e) {
+    // ignore
+  }
   const map = {};
   String(input)
     .split(",")
     .map((p) => p.trim())
     .forEach((pair) => {
-      const [size, qty] = pair.split(":").map((x) => x.trim());
+      if (!pair) return;
+      const [size, qty] = pair.split(":").map((s) => (s ? s.trim() : s));
       if (size) map[size] = Number(qty) || 0;
     });
   return map;
 }
 
+// Promise wrappers for sqlite3 callbacks
+function dbAllAsync(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) return reject(err);
+      resolve(rows || []);
+    });
+  });
+}
+function dbGetAsync(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) return reject(err);
+      resolve(row || null);
+    });
+  });
+}
+function dbRunAsync(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) return reject(err);
+      // return lastID and changes for caller
+      resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+}
+
 /* -------------------------------------------------------------------------- */
-/*                      GET: All Products (Paginated etc.)                    */
+/*                      GET: All Products (paginated + sizes)                 */
 /* -------------------------------------------------------------------------- */
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const search = (req.query.search || "").trim();
-    const sort = (req.query.sort || "newest").trim();
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limitRaw = parseInt(req.query.limit, 10) || 20;
     const limit = limitRaw === 999999 ? null : Math.max(limitRaw, 1);
     const offset = limit ? (page - 1) * limit : 0;
     const like = `%${search}%`;
 
+    const sort = (req.query.sort || "newest").trim();
     const ORDER_MAP = {
-      newest: "updated_at DESC",
-      price_asc: "price ASC",
-      price_desc: "price DESC",
-      best_selling: "COALESCE(sold,0) DESC",
-      low_stock: "stock ASC",
+      newest: "p.updated_at DESC",
+      price_asc: "p.price ASC",
+      price_desc: "p.price DESC",
+      best_selling: "COALESCE(p.sold,0) DESC",
+      low_stock: "total_stock ASC",
     };
-
-    const isOutOfStockFilter = sort === "out_of_stock";
     const orderClause = ORDER_MAP[sort] || ORDER_MAP.newest;
-    const lowStockThreshold = typeof req.query.low_stock_threshold !== "undefined"
-      ? Number(req.query.low_stock_threshold)
-      : null;
 
-    let whereSQL = `WHERE (name LIKE ? OR category LIKE ? OR subcategory LIKE ?)`;
-    const params = [like, like, like];
+    // Count total (without sizes aggregation)
+    const countSQL = `
+      SELECT COUNT(*) AS total
+      FROM products p
+      WHERE (p.name LIKE ? OR p.category LIKE ? OR p.subcategory LIKE ?)
+    `;
+    const countRow = await dbGetAsync(countSQL, [like, like, like]);
+    const total = Number(countRow?.total || 0);
 
-    if (isOutOfStockFilter) {
-      whereSQL += ` AND stock = 0`;
-    }
-
-    if (sort === "low_stock" && Number.isFinite(lowStockThreshold)) {
-      whereSQL += ` AND stock <= ?`;
-      params.push(lowStockThreshold);
-    }
-
+    // Fetch product rows with requested pagination
     const selectSQL = `
-      SELECT id, name, category, subcategory, price, actualPrice, images, colors,
-             stock, rating, updated_at, COALESCE(sold,0) AS sold, featured, size_stock
-      FROM products
-      ${whereSQL}
+      SELECT p.*
+      FROM products p
+      WHERE (p.name LIKE ? OR p.category LIKE ? OR p.subcategory LIKE ?)
       ORDER BY ${orderClause}
       ${limit ? "LIMIT ? OFFSET ?" : ""}
     `;
+    const selectParams = limit ? [like, like, like, limit, offset] : [like, like, like];
+    const products = await dbAllAsync(selectSQL, selectParams);
 
-    const countSQL = `
-      SELECT COUNT(*) AS total
-      FROM products
-      ${whereSQL}
-    `;
+    // For each product fetch sizes from product_sizes
+    const enriched = await Promise.all(
+      products.map(async (p) => {
+        const sizes = await dbAllAsync(`SELECT size, stock FROM product_sizes WHERE product_id = ?`, [p.id]);
+        const sizesFormatted = (sizes || []).map((s) => ({ size: s.size, stock: Number(s.stock || 0) }));
+        const totalStock = sizesFormatted.reduce((acc, it) => acc + Number(it.stock || 0), 0);
+        // if product.stock is present and sizes empty, keep product.stock
+        const finalTotal = totalStock || Number(p.stock || 0);
+        return { ...p, sizes: sizesFormatted, totalStock: finalTotal };
+      })
+    );
 
-    const selectParams = limit ? [...params, limit, offset] : [...params];
-
-    db.all(selectSQL, selectParams, (err, rows) => {
-      if (err) {
-        console.error("Products list error:", err);
-        return res.status(500).json({ message: "DB error", detail: err.message });
-      }
-
-      db.get(countSQL, params, (err2, countRow) => {
-        if (err2) {
-          console.error("Products count error:", err2);
-          return res.status(500).json({ message: "DB error", detail: err2.message });
-        }
-
-        return res.json({
-          data: rows || [],
-          total: countRow?.total || 0,
-          page,
-          limit: limit ?? "all",
-        });
-      });
+    return res.json({
+      data: enriched,
+      total,
+      page,
+      limit: limit ?? "all",
     });
-  } catch (ex) {
-    console.error("Unhandled error in GET /admin/products:", ex);
-    res.status(500).json({ message: "Server error", detail: ex.message });
+  } catch (err) {
+    console.error("Unhandled error in GET /admin/products:", err);
+    return res.status(500).json({ message: "Server error", detail: err.message });
   }
 });
 
 /* -------------------------------------------------------------------------- */
 /*                          POST: Add Single Product                          */
 /* -------------------------------------------------------------------------- */
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   try {
     let {
       name,
@@ -166,125 +174,136 @@ router.post("/", (req, res) => {
       return res.status(400).json({ message: "Name, category, and price are required" });
     }
 
+    // parse sizes mapping
     const parsedSizeStock = parseSizeStock(size_stock);
-    const totalStock =
-      Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0) ||
-      Number(stock) ||
-      0;
+    const totalFromSizes = Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0);
+    const totalStock = totalFromSizes || Number(stock) || 0;
 
-    db.run(
-      `INSERT INTO products 
+    // Insert product
+    const insertSQL = `
+      INSERT INTO products
         (name, category, price, actualPrice, images, rating, sizes, colors,
-         originalPrice, description, subcategory, stock, featured, size_stock, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-      [
-        name.trim(),
-        category.trim(),
-        Number(price) || 0,
-        Number(actualPrice) || 0,
-        images || "",
-        Number(rating) || 0,
-        sizes || "",
-        colors || "",
-        Number(originalPrice) || 0,
-        description || "",
-        subcategory || "",
-        totalStock,
-        Number(featured) || 0,
-        JSON.stringify(parsedSizeStock),
-      ],
-      function (err) {
-        if (err) {
-          console.error("Insert product error:", err);
-          return res.status(500).json({ message: "DB insert error", detail: err.message });
-        }
+         originalPrice, description, subcategory, stock, featured, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `;
+    const insertParams = [
+      (name || "").trim(),
+      (category || "").trim(),
+      Number(price) || 0,
+      Number(actualPrice) || 0,
+      images || "",
+      Number(rating) || 0,
+      sizes || "",
+      colors || "",
+      Number(originalPrice) || 0,
+      description || "",
+      subcategory || "",
+      totalStock,
+      Number(featured) || 0,
+    ];
 
-        db.get("SELECT * FROM products WHERE id = ?", [this.lastID], (err2, row) => {
-          if (err2) {
-            console.error("Fetch new product error:", err2);
-            return res.status(500).json({ message: "DB read error", detail: err2.message });
-          }
-          return res.json(row);
-        });
+    const { lastID } = await dbRunAsync(insertSQL, insertParams);
+    const productId = lastID;
+
+    // Insert product_sizes for each size
+    if (parsedSizeStock && Object.keys(parsedSizeStock).length > 0) {
+      const insertSizeStmt = db.prepare(`INSERT INTO product_sizes (product_id, size, stock) VALUES (?, ?, ?)`);
+      for (const [size, qty] of Object.entries(parsedSizeStock)) {
+        insertSizeStmt.run([productId, size, Number(qty) || 0]);
       }
-    );
-  } catch (ex) {
-    console.error("Unhandled error in POST /admin/products:", ex);
-    res.status(500).json({ message: "Server error", detail: ex.message });
+      insertSizeStmt.finalize();
+    }
+
+    // Return new product with sizes
+    const productRow = await dbGetAsync(`SELECT * FROM products WHERE id = ?`, [productId]);
+    const sizesRows = await dbAllAsync(`SELECT size, stock FROM product_sizes WHERE product_id = ?`, [productId]);
+    const sizesFormatted = (sizesRows || []).map((s) => ({ size: s.size, stock: Number(s.stock || 0) }));
+    const total = sizesFormatted.reduce((a, b) => a + Number(b.stock || 0), 0) || Number(productRow.stock || 0);
+
+    return res.json({ ...productRow, sizes: sizesFormatted, totalStock: total });
+  } catch (err) {
+    console.error("Unhandled error in POST /admin/products:", err);
+    return res.status(500).json({ message: "Server error", detail: err.message });
   }
 });
 
 /* -------------------------------------------------------------------------- */
 /*                            PUT: Edit Product                               */
 /* -------------------------------------------------------------------------- */
-router.put("/:id", (req, res) => {
+router.put("/:id", async (req, res) => {
   try {
+    const id = Number(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid product id" });
+
     const parsedSizeStock = parseSizeStock(req.body.size_stock);
-    const totalStock =
-      Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0) ||
-      Number(req.body.stock) ||
-      0;
+    const totalFromSizes = Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0);
+    const totalStock = totalFromSizes || Number(req.body.stock) || 0;
 
-    db.run(
-      `UPDATE products
-       SET name=?, category=?, price=?, actualPrice=?, images=?, rating=?, sizes=?, colors=?,
-           originalPrice=?, description=?, subcategory=?, stock=?, featured=?, size_stock=?, updated_at=datetime('now')
-       WHERE id=?`,
-      [
-        (req.body.name || "").trim(),
-        (req.body.category || "").trim(),
-        Number(req.body.price) || 0,
-        Number(req.body.actualPrice) || 0,
-        req.body.images || "",
-        Number(req.body.rating) || 0,
-        req.body.sizes || "",
-        (req.body.colors || req.body.color || "").toString(),
-        Number(req.body.originalPrice) || 0,
-        req.body.description || "",
-        req.body.subcategory || "",
-        totalStock,
-        Number(req.body.featured) || 0,
-        JSON.stringify(parsedSizeStock),
-        req.params.id,
-      ],
-      function (err) {
-        if (err) {
-          console.error("Update product error:", err);
-          return res.status(500).json({ message: "DB update error", detail: err.message });
-        }
-        if (this.changes === 0) return res.status(404).json({ message: "Product not found" });
+    const updateSQL = `
+      UPDATE products
+      SET name = ?, category = ?, price = ?, actualPrice = ?, images = ?, rating = ?, sizes = ?, colors = ?,
+          originalPrice = ?, description = ?, subcategory = ?, stock = ?, featured = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `;
+    const updateParams = [
+      (req.body.name || "").trim(),
+      (req.body.category || "").trim(),
+      Number(req.body.price) || 0,
+      Number(req.body.actualPrice) || 0,
+      req.body.images || "",
+      Number(req.body.rating) || 0,
+      req.body.sizes || "",
+      (req.body.colors || req.body.color || "").toString(),
+      Number(req.body.originalPrice) || 0,
+      req.body.description || "",
+      req.body.subcategory || "",
+      totalStock,
+      Number(req.body.featured) || 0,
+      id,
+    ];
 
-        db.get("SELECT * FROM products WHERE id = ?", [req.params.id], (err2, row) => {
-          if (err2) {
-            console.error("Fetch updated product error:", err2);
-            return res.status(500).json({ message: "DB read error", detail: err2.message });
-          }
-          return res.json(row);
-        });
+    const { changes } = await dbRunAsync(updateSQL, updateParams);
+    if (!changes) return res.status(404).json({ message: "Product not found" });
+
+    // Replace product_sizes: delete existing and insert new sizes
+    await dbRunAsync(`DELETE FROM product_sizes WHERE product_id = ?`, [id]);
+    if (parsedSizeStock && Object.keys(parsedSizeStock).length > 0) {
+      const insertSizeStmt = db.prepare(`INSERT INTO product_sizes (product_id, size, stock) VALUES (?, ?, ?)`);
+      for (const [size, qty] of Object.entries(parsedSizeStock)) {
+        insertSizeStmt.run([id, size, Number(qty) || 0]);
       }
-    );
-  } catch (ex) {
-    console.error("Unhandled error in PUT /admin/products/:id:", ex);
-    res.status(500).json({ message: "Server error", detail: ex.message });
+      insertSizeStmt.finalize();
+    }
+
+    // Return updated product with sizes
+    const productRow = await dbGetAsync(`SELECT * FROM products WHERE id = ?`, [id]);
+    const sizesRows = await dbAllAsync(`SELECT size, stock FROM product_sizes WHERE product_id = ?`, [id]);
+    const sizesFormatted = (sizesRows || []).map((s) => ({ size: s.size, stock: Number(s.stock || 0) }));
+    const total = sizesFormatted.reduce((a, b) => a + Number(b.stock || 0), 0) || Number(productRow.stock || 0);
+
+    return res.json({ ...productRow, sizes: sizesFormatted, totalStock: total });
+  } catch (err) {
+    console.error("Unhandled error in PUT /admin/products/:id:", err);
+    return res.status(500).json({ message: "Server error", detail: err.message });
   }
 });
 
 /* -------------------------------------------------------------------------- */
 /*                           DELETE: Remove Product                           */
 /* -------------------------------------------------------------------------- */
-router.delete("/:id", (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
-    db.run("DELETE FROM products WHERE id = ?", [req.params.id], function (err) {
-      if (err) {
-        console.error("Delete product error:", err);
-        return res.status(500).json({ message: "DB delete error", detail: err.message });
-      }
-      if (this.changes === 0) return res.status(404).json({ message: "Product not found" });
-      return res.json({ id: req.params.id, message: "✅ Product deleted successfully" });
-    });
-  } catch (ex) {
-    console.error("Unhandled error in DELETE /admin/products/:id:", ex);
-    res.status(500).json({ message: "Server error", detail: ex.message });
+    const id = Number(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid product id" });
+
+    await dbRunAsync("DELETE FROM product_sizes WHERE product_id = ?", [id]);
+    const { changes } = await dbRunAsync("DELETE FROM products WHERE id = ?", [id]);
+    if (!changes) return res.status(404).json({ message: "Product not found" });
+
+    return res.json({ id, message: "✅ Product deleted successfully" });
+  } catch (err) {
+    console.error("Unhandled error in DELETE /admin/products/:id:", err);
+    return res.status(500).json({ message: "Server error", detail: err.message });
   }
 });
 
@@ -300,13 +319,12 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
   fs.createReadStream(filePath)
     .pipe(csvParser())
     .on("data", (row) => {
+      // require minimal fields
       if (!row.name || !row.category || !row.price) return;
 
       const parsedSizeStock = parseSizeStock(row.size_stock);
-      const totalStock =
-        Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0) ||
-        Number(row.stock) ||
-        0;
+      const totalFromSizes = Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0);
+      const totalStock = totalFromSizes || Number(row.stock) || 0;
 
       products.push({
         name: row.name.trim(),
@@ -322,7 +340,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         subcategory: row.subcategory || "",
         stock: totalStock,
         featured: Number(row.featured) || 0,
-        size_stock: JSON.stringify(parsedSizeStock),
+        size_stock: parsedSizeStock, // keep as object for insertion below
       });
     })
     .on("end", () => {
@@ -331,51 +349,80 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         return res.status(400).json({ message: "CSV contains no valid product data" });
       }
 
+      // Insert products + sizes inside a transaction
       db.serialize(() => {
         db.run("BEGIN TRANSACTION");
-        const stmt = db.prepare(
-          `INSERT INTO products 
+        const insertProduct = db.prepare(
+          `INSERT INTO products
             (name, category, price, actualPrice, images, rating, sizes, colors,
-             originalPrice, description, subcategory, stock, featured, size_stock, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+             originalPrice, description, subcategory, stock, featured, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
         );
 
+        const insertSize = db.prepare(`INSERT INTO product_sizes (product_id, size, stock) VALUES (?, ?, ?)`);
+
         for (const p of products) {
-          stmt.run([
-            p.name,
-            p.category,
-            p.price,
-            p.actualPrice,
-            p.images,
-            p.rating,
-            p.sizes,
-            p.colors,
-            p.originalPrice,
-            p.description,
-            p.subcategory,
-            p.stock,
-            p.featured,
-            p.size_stock,
-          ]);
+          insertProduct.run(
+            [
+              p.name,
+              p.category,
+              p.price,
+              p.actualPrice,
+              p.images,
+              p.rating,
+              p.sizes,
+              p.colors,
+              p.originalPrice,
+              p.description,
+              p.subcategory,
+              p.stock,
+              p.featured,
+            ],
+            function (err) {
+              if (err) {
+                console.error("Bulk product insert error:", err);
+                // we continue; error will be handled on finalize/commit
+                return;
+              }
+              const pid = this.lastID;
+              if (p.size_stock && Object.keys(p.size_stock).length > 0) {
+                for (const [size, qty] of Object.entries(p.size_stock)) {
+                  insertSize.run([pid, size, Number(qty) || 0]);
+                }
+              }
+            }
+          );
         }
 
-        stmt.finalize((err) => {
-          if (err) {
-            console.error("Bulk insert finalize error:", err);
+        // finalize prepared statements, then commit
+        insertProduct.finalize((prodErr) => {
+          if (prodErr) {
+            console.error("Bulk insert finalize error (product):", prodErr);
             db.run("ROLLBACK", () => {
               try { fs.unlinkSync(filePath); } catch (e) {}
-              return res.status(500).json({ message: "Bulk insert error", detail: err.message });
+              return res.status(500).json({ message: "Bulk insert error", detail: prodErr.message });
             });
             return;
           }
 
-          db.run("COMMIT", (commitErr) => {
-            try { fs.unlinkSync(filePath); } catch (e) {}
-            if (commitErr) {
-              console.error("Bulk insert commit error:", commitErr);
-              return res.status(500).json({ message: "Bulk insert commit error", detail: commitErr.message });
+          insertSize.finalize((sizeErr) => {
+            if (sizeErr) {
+              console.error("Bulk insert finalize error (size):", sizeErr);
+              db.run("ROLLBACK", () => {
+                try { fs.unlinkSync(filePath); } catch (e) {}
+                return res.status(500).json({ message: "Bulk insert error", detail: sizeErr.message });
+              });
+              return;
             }
-            return res.json({ message: `✅ Bulk upload complete. ${products.length} products added.` });
+
+            db.run("COMMIT", (commitErr) => {
+              try { fs.unlinkSync(filePath); } catch (e) {}
+              if (commitErr) {
+                console.error("Bulk insert commit error:", commitErr);
+                return res.status(500).json({ message: "Bulk insert commit error", detail: commitErr.message });
+              }
+              return res.json({ message: `✅ Bulk upload complete. ${products.length} products added.` });
+            });
           });
         });
       });
@@ -383,7 +430,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
     .on("error", (err) => {
       try { fs.unlinkSync(filePath); } catch (e) {}
       console.error("CSV parse error:", err);
-      res.status(500).json({ message: "CSV parse error", detail: err.message });
+      return res.status(500).json({ message: "CSV parse error", detail: err.message });
     });
 });
 
@@ -448,31 +495,6 @@ router.post("/categories", (req, res) => {
   }
 });
 
-/* -------------------------------------------------------------------------- */
-/*                           SINGLE PRODUCT ROUTE                             */
-/* -------------------------------------------------------------------------- */
-router.get("/:id", (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid product ID" });
-
-    db.get("SELECT * FROM products WHERE id = ?", [id], (err, row) => {
-      if (err) {
-        console.error("Fetch single product error:", err);
-        return res.status(500).json({ message: "DB error", detail: err.message });
-      }
-      if (!row) return res.status(404).json({ message: "Product not found" });
-      return res.json(row);
-    });
-  } catch (ex) {
-    console.error("Unhandled error in GET /admin/products/:id:", ex);
-    res.status(500).json({ message: "Server error", detail: ex.message });
-  }
-});
-
-/* -------------------------------------------------------------------------- */
-/*                             CATEGORY UPDATES                               */
-/* -------------------------------------------------------------------------- */
 router.put("/categories/:id/status", (req, res) => {
   const { status } = req.body;
 
@@ -523,6 +545,28 @@ router.put("/categories/:id", (req, res) => {
       });
     }
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*                           SINGLE PRODUCT ROUTE                             */
+/* -------------------------------------------------------------------------- */
+router.get("/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid product ID" });
+
+    const product = await dbGetAsync("SELECT * FROM products WHERE id = ?", [id]);
+    if (!product) return res.status(404).json({ message: "Product not found" });
+
+    const sizes = await dbAllAsync("SELECT size, stock FROM product_sizes WHERE product_id = ?", [id]);
+    const sizesFormatted = (sizes || []).map((s) => ({ size: s.size, stock: Number(s.stock || 0) }));
+    const total = sizesFormatted.reduce((a, b) => a + Number(b.stock || 0), 0) || Number(product.stock || 0);
+
+    return res.json({ ...product, sizes: sizesFormatted, totalStock: total });
+  } catch (err) {
+    console.error("Unhandled error in GET /admin/products/:id:", err);
+    return res.status(500).json({ message: "Server error", detail: err.message });
+  }
 });
 
 /* -------------------------------------------------------------------------- */
