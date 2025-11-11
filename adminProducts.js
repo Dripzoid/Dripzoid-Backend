@@ -27,15 +27,37 @@ const db = new sqlite3.Database(dbPath, (err) => {
   }
 });
 
-
 // Multer config
 const uploadsDir = path.resolve(__dirname, "../uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const upload = multer({ dest: uploadsDir });
 
-/**
- * GET: All Products (paginated, search, sorting)
- */
+/* -------------------------------------------------------------------------- */
+/*                            Helper: parseSizeStock                          */
+/* -------------------------------------------------------------------------- */
+function parseSizeStock(input) {
+  if (!input) return {};
+  if (typeof input === "object") return input;
+
+  try {
+    const parsed = JSON.parse(input);
+    if (typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {}
+
+  const map = {};
+  String(input)
+    .split(",")
+    .map((p) => p.trim())
+    .forEach((pair) => {
+      const [size, qty] = pair.split(":").map((x) => x.trim());
+      if (size) map[size] = Number(qty) || 0;
+    });
+  return map;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                      GET: All Products (Paginated etc.)                    */
+/* -------------------------------------------------------------------------- */
 router.get("/", (req, res) => {
   try {
     const search = (req.query.search || "").trim();
@@ -74,7 +96,7 @@ router.get("/", (req, res) => {
 
     const selectSQL = `
       SELECT id, name, category, subcategory, price, actualPrice, images, colors,
-             stock, rating, updated_at, COALESCE(sold,0) AS sold, featured
+             stock, rating, updated_at, COALESCE(sold,0) AS sold, featured, size_stock
       FROM products
       ${whereSQL}
       ORDER BY ${orderClause}
@@ -115,9 +137,9 @@ router.get("/", (req, res) => {
   }
 });
 
-/**
- * POST: Add Single Product
- */
+/* -------------------------------------------------------------------------- */
+/*                          POST: Add Single Product                          */
+/* -------------------------------------------------------------------------- */
 router.post("/", (req, res) => {
   try {
     let {
@@ -135,6 +157,7 @@ router.post("/", (req, res) => {
       subcategory,
       stock,
       featured,
+      size_stock,
     } = req.body;
 
     colors = (colors || color || "").toString();
@@ -143,32 +166,32 @@ router.post("/", (req, res) => {
       return res.status(400).json({ message: "Name, category, and price are required" });
     }
 
-    price = Number(price) || 0;
-    actualPrice = Number(actualPrice) || 0;
-    rating = Number(rating) || 0;
-    originalPrice = Number(originalPrice) || 0;
-    stock = Number(stock) || 0;
-    featured = Number(featured) || 0;
+    const parsedSizeStock = parseSizeStock(size_stock);
+    const totalStock =
+      Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0) ||
+      Number(stock) ||
+      0;
 
     db.run(
       `INSERT INTO products 
         (name, category, price, actualPrice, images, rating, sizes, colors,
-         originalPrice, description, subcategory, stock, featured, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+         originalPrice, description, subcategory, stock, featured, size_stock, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
       [
         name.trim(),
         category.trim(),
-        price,
-        actualPrice,
+        Number(price) || 0,
+        Number(actualPrice) || 0,
         images || "",
-        rating,
+        Number(rating) || 0,
         sizes || "",
         colors || "",
-        originalPrice,
+        Number(originalPrice) || 0,
         description || "",
         subcategory || "",
-        stock,
-        featured,
+        totalStock,
+        Number(featured) || 0,
+        JSON.stringify(parsedSizeStock),
       ],
       function (err) {
         if (err) {
@@ -191,56 +214,37 @@ router.post("/", (req, res) => {
   }
 });
 
-/**
- * PUT: Edit Product
- */
+/* -------------------------------------------------------------------------- */
+/*                            PUT: Edit Product                               */
+/* -------------------------------------------------------------------------- */
 router.put("/:id", (req, res) => {
   try {
-    let {
-      name,
-      category,
-      price,
-      actualPrice,
-      images,
-      rating,
-      sizes,
-      colors,
-      color,
-      originalPrice,
-      description,
-      subcategory,
-      stock,
-      featured,
-    } = req.body;
-
-    colors = (colors || color || "").toString();
-
-    price = Number(price) || 0;
-    actualPrice = Number(actualPrice) || 0;
-    rating = Number(rating) || 0;
-    originalPrice = Number(originalPrice) || 0;
-    stock = Number(stock) || 0;
-    featured = Number(featured) || 0;
+    const parsedSizeStock = parseSizeStock(req.body.size_stock);
+    const totalStock =
+      Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0) ||
+      Number(req.body.stock) ||
+      0;
 
     db.run(
       `UPDATE products
-       SET name = ?, category = ?, price = ?, actualPrice = ?, images = ?, rating = ?, sizes = ?,
-           colors = ?, originalPrice = ?, description = ?, subcategory = ?, stock = ?, featured = ?, updated_at = datetime('now')
-       WHERE id = ?`,
+       SET name=?, category=?, price=?, actualPrice=?, images=?, rating=?, sizes=?, colors=?,
+           originalPrice=?, description=?, subcategory=?, stock=?, featured=?, size_stock=?, updated_at=datetime('now')
+       WHERE id=?`,
       [
-        (name || "").trim(),
-        (category || "").trim(),
-        price,
-        actualPrice,
-        images || "",
-        rating,
-        sizes || "",
-        colors || "",
-        originalPrice,
-        description || "",
-        subcategory || "",
-        stock,
-        featured,
+        (req.body.name || "").trim(),
+        (req.body.category || "").trim(),
+        Number(req.body.price) || 0,
+        Number(req.body.actualPrice) || 0,
+        req.body.images || "",
+        Number(req.body.rating) || 0,
+        req.body.sizes || "",
+        (req.body.colors || req.body.color || "").toString(),
+        Number(req.body.originalPrice) || 0,
+        req.body.description || "",
+        req.body.subcategory || "",
+        totalStock,
+        Number(req.body.featured) || 0,
+        JSON.stringify(parsedSizeStock),
         req.params.id,
       ],
       function (err) {
@@ -265,9 +269,9 @@ router.put("/:id", (req, res) => {
   }
 });
 
-/**
- * DELETE: Remove Product
- */
+/* -------------------------------------------------------------------------- */
+/*                           DELETE: Remove Product                           */
+/* -------------------------------------------------------------------------- */
 router.delete("/:id", (req, res) => {
   try {
     db.run("DELETE FROM products WHERE id = ?", [req.params.id], function (err) {
@@ -284,9 +288,9 @@ router.delete("/:id", (req, res) => {
   }
 });
 
-/**
- * POST: Bulk Upload Products via CSV
- */
+/* -------------------------------------------------------------------------- */
+/*                     POST: Bulk Upload Products via CSV                     */
+/* -------------------------------------------------------------------------- */
 router.post("/bulk-upload", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ message: "No CSV file uploaded" });
 
@@ -297,6 +301,12 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
     .pipe(csvParser())
     .on("data", (row) => {
       if (!row.name || !row.category || !row.price) return;
+
+      const parsedSizeStock = parseSizeStock(row.size_stock);
+      const totalStock =
+        Object.values(parsedSizeStock).reduce((a, b) => a + (Number(b) || 0), 0) ||
+        Number(row.stock) ||
+        0;
 
       products.push({
         name: row.name.trim(),
@@ -310,8 +320,9 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         originalPrice: Number(row.originalPrice) || 0,
         description: row.description || "",
         subcategory: row.subcategory || "",
-        stock: Number(row.stock) || 0,
+        stock: totalStock,
         featured: Number(row.featured) || 0,
+        size_stock: JSON.stringify(parsedSizeStock),
       });
     })
     .on("end", () => {
@@ -325,8 +336,8 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
         const stmt = db.prepare(
           `INSERT INTO products 
             (name, category, price, actualPrice, images, rating, sizes, colors,
-             originalPrice, description, subcategory, stock, featured, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+             originalPrice, description, subcategory, stock, featured, size_stock, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
         );
 
         for (const p of products) {
@@ -344,6 +355,7 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
             p.subcategory,
             p.stock,
             p.featured,
+            p.size_stock,
           ]);
         }
 
@@ -375,15 +387,9 @@ router.post("/bulk-upload", upload.single("file"), (req, res) => {
     });
 });
 
-
-
-/**
- * ================================
- * CATEGORY ROUTES
- * ================================
- */
-
-// GET: All categories grouped by main category
+/* -------------------------------------------------------------------------- */
+/*                              CATEGORY ROUTES                               */
+/* -------------------------------------------------------------------------- */
 router.get("/categories", (req, res) => {
   const sql = `
     SELECT id, category, subcategory, slug, status, sort_order,
@@ -401,11 +407,10 @@ router.get("/categories", (req, res) => {
   });
 });
 
-// POST: Add new subcategory
 router.post("/categories", (req, res) => {
   try {
     const {
-      category,       // Must be Men | Women | Kids
+      category,
       subcategory,
       slug,
       status = "active",
@@ -443,9 +448,9 @@ router.post("/categories", (req, res) => {
   }
 });
 
-/**
- * GET: Single Product by ID
- */
+/* -------------------------------------------------------------------------- */
+/*                           SINGLE PRODUCT ROUTE                             */
+/* -------------------------------------------------------------------------- */
 router.get("/:id", (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -465,6 +470,9 @@ router.get("/:id", (req, res) => {
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/*                             CATEGORY UPDATES                               */
+/* -------------------------------------------------------------------------- */
 router.put("/categories/:id/status", (req, res) => {
   const { status } = req.body;
 
@@ -491,8 +499,6 @@ router.put("/categories/:id/status", (req, res) => {
   );
 });
 
-
-// PUT: Update subcategory
 router.put("/categories/:id", (req, res) => {
   const { subcategory, slug, status, sort_order, parent_id, metadata } = req.body;
 
@@ -519,25 +525,7 @@ router.put("/categories/:id", (req, res) => {
   );
 });
 
-// DELETE: Soft delete category
-router.delete("/categories/:id", (req, res) => {
-  db.run(
-    "UPDATE categories SET is_deleted = 1, updated_at = datetime('now') WHERE id = ?",
-    [req.params.id],
-    function (err) {
-      if (err) {
-        console.error("Delete category error:", err);
-        return res.status(500).json({ message: "DB delete error", detail: err.message });
-      }
-      if (this.changes === 0) return res.status(404).json({ message: "Category not found" });
-      return res.json({ id: req.params.id, message: "✅ Category soft-deleted" });
-    }
-  );
-});
-
-
+/* -------------------------------------------------------------------------- */
+/*                           EXPORT ROUTER                                    */
+/* -------------------------------------------------------------------------- */
 export default router;
-
-
-
-
