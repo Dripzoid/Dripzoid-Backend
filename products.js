@@ -60,8 +60,6 @@ const getSizesForProduct = (productId) =>
     db.all(sql, [productId], (err, rows) => {
       if (err) {
         // If product_sizes table doesn't exist or error, fallback to empty
-        // (Frontend parsing code will fallback to other shapes already present)
-        // console.warn("product_sizes fetch error:", err.message);
         return resolve([]);
       }
       if (!rows || rows.length === 0) return resolve([]);
@@ -136,6 +134,7 @@ router.get("/search", (req, res) => {
           sizes: sizesArr.map((s) => s.size), // ["S","M","L"]
           sizeStock: sizeStockMap, // object
           size_stock: JSON.stringify(sizeStockMap), // string for older clients expecting JSON string
+          sizeRows: sizesArr,
           totalStock,
         };
       })
@@ -342,13 +341,14 @@ router.get("/", (req, res) => {
             originalPrice: r.originalPrice !== null ? Number(r.originalPrice) : null,
             rating: r.rating !== null ? Number(r.rating) : null,
             description: r.description,
+            // preserve raw DB stock but also include computed totalStock
             stock: r.stock !== null ? Number(r.stock) : 0,
+            totalStock,
             // mapped per-size values and compatibility fields:
             sizes: sizesArr.map((s) => s.size), // ["S","M"]
-            sizeStock, // object { S:10, M:5 }
+            sizeStock: sizeStockMap, // object { S:10, M:5 }
             size_stock: JSON.stringify(sizeStockMap),
             sizeRows: sizesArr, // the raw rows [{size,stock}, ...]
-            totalStock,
           };
         })
       );
@@ -428,67 +428,6 @@ router.get("/categories", (req, res) => {
   });
 });
 
-/* -------------------- GET SINGLE PRODUCT BY ID -------------------- */
-router.get("/:id", (req, res) => {
-  const { id } = req.params;
-  const query = `SELECT * FROM products WHERE id = ?`;
-
-  db.get(query, [id], async (err, row) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!row) return res.status(404).json({ error: "Product not found" });
-
-    // parse legacy fields
-    const sizesFromField = parseField(row.sizes); // could be ["S","M"] or objects depending on DB
-    const colors = parseField(row.colors);
-    const images = parseField(row.images);
-
-    // fetch product_sizes
-    const sizesArr = await getSizesForProduct(row.id); // [{size,stock},...]
-    const sizeStockMap = {};
-    sizesArr.forEach((s) => {
-      if (s && s.size) sizeStockMap[String(s.size)] = Number(s.stock || 0);
-    });
-
-    // If product_sizes is empty but row.sizes contains objects [{size,stock}], try to derive
-    if (sizesArr.length === 0 && Array.isArray(sizesFromField) && sizesFromField.length) {
-      // sizesFromField may be ["S","M"] OR [{size,stock}] OR ["S:10"]
-      const fallbackMap = {};
-      sizesFromField.forEach((it) => {
-        if (!it) return;
-        if (typeof it === "string") {
-          const part = it.trim();
-          if (part.includes(":") || part.includes("=")) {
-            const [size, qty] = part.split(/[:=]/).map((s) => s && s.trim());
-            if (size) fallbackMap[size] = Number(qty) || 0;
-          } else {
-            fallbackMap[part] = fallbackMap[part] || 0;
-          }
-        } else if (typeof it === "object") {
-          const size = it.size ?? it.size_name ?? it.name ?? it.label;
-          const qty = Number(it.stock ?? it.qty ?? it.quantity ?? 0) || 0;
-          if (size) fallbackMap[size] = qty;
-        }
-      });
-      Object.assign(sizeStockMap, fallbackMap);
-    }
-
-    const totalStock = Object.values(sizeStockMap).reduce((acc, v) => acc + Number(v || 0), 0);
-
-    res.json({
-      ...row,
-      id: Number(row.id),
-      sizes: Array.isArray(sizesFromField) && sizesFromField.every((x) => typeof x === "string") && sizesFromField.length ? sizesFromField : Object.keys(sizeStockMap),
-      sizeRows: sizesArr,
-      sizeStock, // object map (might be empty)
-      size_stock: JSON.stringify(sizeStockMap),
-      totalStock,
-      colors,
-      images,
-      stock: Number(row.stock) || totalStock,
-    });
-  });
-});
-
 /* -------------------- RELATED PRODUCTS -------------------- */
 router.get("/related/:id", (req, res) => {
   const { id } = req.params;
@@ -543,6 +482,71 @@ router.get("/related/:id", (req, res) => {
       );
 
       res.json(enriched);
+    });
+  });
+});
+
+/* -------------------- GET SINGLE PRODUCT BY ID -------------------- */
+router.get("/:id", (req, res) => {
+  const { id } = req.params;
+  const query = `SELECT * FROM products WHERE id = ?`;
+
+  db.get(query, [id], async (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) return res.status(404).json({ error: "Product not found" });
+
+    // parse legacy fields
+    const sizesFromField = parseField(row.sizes); // could be ["S","M"] or objects depending on DB
+    const colors = parseField(row.colors);
+    const images = parseField(row.images);
+
+    // fetch product_sizes
+    const sizesArr = await getSizesForProduct(row.id); // [{size,stock},...]
+    const sizeStockMap = {};
+    sizesArr.forEach((s) => {
+      if (s && s.size) sizeStockMap[String(s.size)] = Number(s.stock || 0);
+    });
+
+    // If product_sizes is empty but row.sizes contains objects [{size,stock}] or "S:10" strings, try to derive
+    if (sizesArr.length === 0 && Array.isArray(sizesFromField) && sizesFromField.length) {
+      const fallbackMap = {};
+      sizesFromField.forEach((it) => {
+        if (!it) return;
+        if (typeof it === "string") {
+          const part = it.trim();
+          if (part.includes(":") || part.includes("=")) {
+            const [size, qty] = part.split(/[:=]/).map((s2) => s2 && s2.trim());
+            if (size) fallbackMap[size] = Number(qty) || 0;
+          } else {
+            fallbackMap[part] = fallbackMap[part] || 0;
+          }
+        } else if (typeof it === "object") {
+          const size = it.size ?? it.size_name ?? it.name ?? it.label;
+          const qty = Number(it.stock ?? it.qty ?? it.quantity ?? 0) || 0;
+          if (size) fallbackMap[size] = qty;
+        }
+      });
+      Object.assign(sizeStockMap, fallbackMap);
+    }
+
+    const totalStock = Object.values(sizeStockMap).reduce((acc, v) => acc + Number(v || 0), 0);
+
+    res.json({
+      ...row,
+      id: Number(row.id),
+      sizes:
+        Array.isArray(sizesFromField) &&
+        sizesFromField.every((x) => typeof x === "string") &&
+        sizesFromField.length
+          ? sizesFromField
+          : Object.keys(sizeStockMap),
+      sizeRows: sizesArr,
+      sizeStock: sizeStockMap, // object map (might be empty)
+      size_stock: JSON.stringify(sizeStockMap),
+      totalStock,
+      colors,
+      images,
+      stock: Number(row.stock) || totalStock,
     });
   });
 });
