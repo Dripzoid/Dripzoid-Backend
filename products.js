@@ -1,4 +1,4 @@
-  import express from "express";
+import express from "express";
 import path from "path";
 import sqlite3 from "sqlite3";
 import { fileURLToPath } from "url";
@@ -11,7 +11,7 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ Use env var or fallback to local file
+// Use env var or fallback to local file
 const dbPath = process.env.DATABASE_FILE || path.join(__dirname, "./dripzoid.db");
 
 const db = new sqlite3.Database(dbPath, (err) => {
@@ -21,8 +21,10 @@ const db = new sqlite3.Database(dbPath, (err) => {
     console.log("✅ Products router connected to DB:", dbPath);
   }
 });
+
 const DEFAULT_LIMIT = 16;
 
+/* -------------------- UTILITIES -------------------- */
 const csvToArray = (v) => {
   if (!v) return null;
   if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
@@ -39,67 +41,107 @@ const csvToArray = (v) => {
   return null;
 };
 
+const parseField = (field) => {
+  if (!field) return [];
+  try {
+    return JSON.parse(field);
+  } catch {
+    return String(field).split(",").map((v) => v.trim()).filter(Boolean);
+  }
+};
+
+/**
+ * Return array of { size, stock } rows for a product_id
+ * Resolves to [] on any DB error
+ */
+const getSizesForProduct = (productId) =>
+  new Promise((resolve) => {
+    const sql = `SELECT size, stock FROM product_sizes WHERE product_id = ? ORDER BY id ASC`;
+    db.all(sql, [productId], (err, rows) => {
+      if (err) {
+        // If product_sizes table doesn't exist or error, fallback to empty
+        // (Frontend parsing code will fallback to other shapes already present)
+        // console.warn("product_sizes fetch error:", err.message);
+        return resolve([]);
+      }
+      if (!rows || rows.length === 0) return resolve([]);
+      resolve(rows.map((r) => ({ size: r.size, stock: Number(r.stock) || 0 })));
+    });
+  });
+
 /* -------------------- GLOBAL SEARCH -------------------- */
-// 🔹 must be ABOVE "/:id" route
+// must be above "/:id" route
 router.get("/search", (req, res) => {
   let { query = "", section = "all" } = req.query;
-  query = query.trim();
-
+  query = String(query).trim();
   if (!query) return res.json([]);
 
   const whereParts = ["(name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)"];
   const params = [`%${query}%`, `%${query}%`];
 
-  // Optional section filter
+  // Optional section filter (simple mapping; adjust to your real mapping)
   const sectionMap = {
     men: ["Shirts", "Pants", "Hoodies", "Jeans"],
     women: ["Dresses", "Tops", "Jeans", "Skirts"],
     kids: ["Shirts", "Pants", "Toys", "Hoodies"],
   };
 
-  if (section.toLowerCase() in sectionMap) {
-    const cats = sectionMap[section.toLowerCase()];
+  if (section && sectionMap[String(section).toLowerCase()]) {
+    const cats = sectionMap[String(section).toLowerCase()];
     const placeholders = cats.map(() => "?").join(",");
     whereParts.push(`category COLLATE NOCASE IN (${placeholders})`);
     params.push(...cats);
   }
 
-  const whereClause = "WHERE " + whereParts.join(" AND ");
   const limit = 20;
-
   const sql = `
     SELECT id, name, category, subcategory, images
     FROM products
-    ${whereClause}
+    WHERE ${whereParts.join(" AND ")}
     ORDER BY name COLLATE NOCASE ASC
     LIMIT ?
   `;
 
-  db.all(sql, [...params, limit], (err, rows) => {
+  db.all(sql, [...params, limit], async (err, rows) => {
     if (err) return res.status(500).json({ message: err.message });
 
-    const normalized = rows.map((r) => {
-      let image = null;
-      if (r.images) {
-        try {
-          const parsed = JSON.parse(r.images);
-          image = Array.isArray(parsed) ? parsed[0] : parsed;
-        } catch {
-          image = r.images.split(",")[0]?.trim() || null;
+    const enriched = await Promise.all(
+      (rows || []).map(async (r) => {
+        let image = null;
+        if (r.images) {
+          try {
+            const parsed = JSON.parse(r.images);
+            image = Array.isArray(parsed) ? parsed[0] : parsed;
+          } catch {
+            image = String(r.images).split(",")[0]?.trim() || null;
+          }
         }
-      }
 
-      return {
-        id: Number(r.id),
-        name: r.name,
-        category: r.category || "Uncategorized",
-        subcategory: r.subcategory || "General",
-        section: section.toLowerCase() || "all",
-        image,
-      };
-    });
+        const sizesArr = await getSizesForProduct(r.id);
+        // size_stock as object mapping {S:10, M:5}
+        const sizeStockMap = {};
+        sizesArr.forEach((s) => {
+          if (s && s.size) sizeStockMap[String(s.size)] = Number(s.stock || 0);
+        });
 
-    res.json(normalized);
+        const totalStock = Object.values(sizeStockMap).reduce((acc, v) => acc + Number(v || 0), 0);
+
+        return {
+          id: Number(r.id),
+          name: r.name,
+          category: r.category || "Uncategorized",
+          subcategory: r.subcategory || "General",
+          section: String(section).toLowerCase() || "all",
+          image,
+          sizes: sizesArr.map((s) => s.size), // ["S","M","L"]
+          sizeStock: sizeStockMap, // object
+          size_stock: JSON.stringify(sizeStockMap), // string for older clients expecting JSON string
+          totalStock,
+        };
+      })
+    );
+
+    res.json(enriched);
   });
 });
 
@@ -116,18 +158,15 @@ router.get("/", (req, res) => {
     limit,
     search,
     q,
-    gender, // ✅ NEW
+    gender,
   } = req.query;
 
-  const searchQuery = (search || q || "").trim();
+  const searchQuery = String(search || q || "").trim();
 
-  // normalize categories (client might pass category names)
   let categoriesArr = csvToArray(category) || null;
-  if (categoriesArr) {
-    categoriesArr = categoriesArr.map((c) => String(c).trim());
-  }
+  if (categoriesArr) categoriesArr = categoriesArr.map((c) => String(c).trim());
 
-  // ✅ Map gender → category filter
+  // Map gender -> category filter if provided
   if (gender) {
     const g = String(gender).trim().toLowerCase();
     if (g === "men" || g === "man") categoriesArr = ["Men"];
@@ -138,24 +177,20 @@ router.get("/", (req, res) => {
   const subcategoriesArr = csvToArray(subcategory);
   const colorsArr = csvToArray(colors);
 
-  console.log("🔍 Products query:", req.query);
-  console.log("Parsed categories:", categoriesArr);
-
-  // WHERE clause pieces
+  // WHERE parts
   const whereParts = [];
   const params = [];
 
-  // ✅ Always exclude products without a valid price
+  // Exclude rows without a price (keep behaviour from your previous code)
   whereParts.push("price IS NOT NULL");
 
-  // category filter (plain category names)
   if (categoriesArr && categoriesArr.length) {
     const placeholders = categoriesArr.map(() => "?").join(",");
     whereParts.push(`category COLLATE NOCASE IN (${placeholders})`);
     params.push(...categoriesArr);
   }
 
-  // --- Subcategory handling ---
+  // Subcategory handling: supports "Category:Subcategory" pairs or simple subcategory names
   if (subcategoriesArr && subcategoriesArr.length) {
     const decodedEntries = subcategoriesArr.map((entry) => {
       try {
@@ -171,11 +206,8 @@ router.get("/", (req, res) => {
     const orParts = [];
 
     if (pairEntries.length) {
-      const pairClauseParts = pairEntries.map(
-        () => "(category COLLATE NOCASE = ? AND subcategory COLLATE NOCASE = ?)"
-      );
+      const pairClauseParts = pairEntries.map(() => "(category COLLATE NOCASE = ? AND subcategory COLLATE NOCASE = ?)");
       orParts.push(...pairClauseParts);
-
       pairEntries.forEach((rawPair) => {
         const [rawCat = "", rawSub = ""] = String(rawPair).split(":");
         params.push(rawCat.trim(), rawSub.trim());
@@ -188,19 +220,15 @@ router.get("/", (req, res) => {
       params.push(...simpleSubs);
     }
 
-    if (orParts.length) {
-      whereParts.push(`(${orParts.join(" OR ")})`);
-    }
+    if (orParts.length) whereParts.push(`(${orParts.join(" OR ")})`);
   }
 
-  // colors filter
   if (colorsArr && colorsArr.length) {
     const placeholders = colorsArr.map(() => "?").join(",");
     whereParts.push(`colors COLLATE NOCASE IN (${placeholders})`);
     params.push(...colorsArr);
   }
 
-  // ✅ Price filtering
   if (minPrice) {
     whereParts.push("price >= ?");
     params.push(parseFloat(minPrice));
@@ -210,15 +238,14 @@ router.get("/", (req, res) => {
     params.push(parseFloat(maxPrice));
   }
 
-  // ✅ Search
   if (searchQuery) {
     whereParts.push("(name LIKE ? OR description LIKE ?)");
     params.push(`%${searchQuery}%`, `%${searchQuery}%`);
   }
 
-  const whereClause = "WHERE " + whereParts.join(" AND ");
+  const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 
-  // sorting
+  // Sorting
   let orderBy = "ORDER BY id DESC";
   switch ((sort || "").toLowerCase()) {
     case "price_asc":
@@ -240,7 +267,7 @@ router.get("/", (req, res) => {
       break;
   }
 
-  // pagination
+  // pagination parsing
   const clientProvidedPage = Object.prototype.hasOwnProperty.call(req.query, "page");
   const clientProvidedLimit = Object.prototype.hasOwnProperty.call(req.query, "limit");
 
@@ -277,37 +304,62 @@ router.get("/", (req, res) => {
       LIMIT ? OFFSET ?
     `;
 
-    console.log("Final SQL:", sql, params, finalLimit, finalOffset);
-
-    db.all(sql, [...params, finalLimit, finalOffset], (err, rows) => {
+    // Fetch rows
+    db.all(sql, [...params, finalLimit, finalOffset], async (err, rows) => {
       if (err) return res.status(500).json({ message: err.message });
 
-      const normalized = rows.map((r) => ({
-        ...r,
-        id: Number(r.id),
-        price: r.price !== null ? Number(r.price) : null,
-        originalPrice: r.originalPrice !== null ? Number(r.originalPrice) : null,
-        rating: r.rating !== null ? Number(r.rating) : null,
-        stock: r.stock !== null ? Number(r.stock) : 0,
-        images: (() => {
-          if (!r.images) return [];
-          try {
-            const parsed = JSON.parse(r.images);
-            return Array.isArray(parsed) ? parsed : [parsed];
-          } catch {
-            return r.images.split(",").map((s) => s.trim());
-          }
-        })(),
-      }));
+      // Enrich each row with sizes mapping
+      const enriched = await Promise.all(
+        (rows || []).map(async (r) => {
+          // parse images
+          const images = (() => {
+            if (!r.images) return [];
+            try {
+              const parsed = JSON.parse(r.images);
+              return Array.isArray(parsed) ? parsed : [parsed];
+            } catch {
+              return String(r.images).split(",").map((s) => s.trim()).filter(Boolean);
+            }
+          })();
+
+          // fetch product_sizes rows
+          const sizesArr = await getSizesForProduct(r.id); // [ {size, stock}, ... ]
+          const sizeStockMap = {};
+          sizesArr.forEach((s) => {
+            if (s && s.size) sizeStockMap[String(s.size)] = Number(s.stock || 0);
+          });
+
+          const totalStock = Object.values(sizeStockMap).reduce((acc, v) => acc + Number(v || 0), 0);
+
+          return {
+            id: Number(r.id),
+            name: r.name,
+            category: r.category,
+            subcategory: r.subcategory,
+            colors: parseField(r.colors),
+            images,
+            price: r.price !== null ? Number(r.price) : null,
+            originalPrice: r.originalPrice !== null ? Number(r.originalPrice) : null,
+            rating: r.rating !== null ? Number(r.rating) : null,
+            description: r.description,
+            stock: r.stock !== null ? Number(r.stock) : 0,
+            // mapped per-size values and compatibility fields:
+            sizes: sizesArr.map((s) => s.size), // ["S","M"]
+            sizeStock, // object { S:10, M:5 }
+            size_stock: JSON.stringify(sizeStockMap),
+            sizeRows: sizesArr, // the raw rows [{size,stock}, ...]
+            totalStock,
+          };
+        })
+      );
 
       res.json({
         meta: { total, page: finalPage, pages, limit: finalLimit },
-        data: normalized,
+        data: enriched,
       });
     });
   });
 });
-
 
 /* -------------------- COLORS LIST -------------------- */
 router.get("/colors", (req, res) => {
@@ -327,11 +379,10 @@ router.get("/colors", (req, res) => {
           allColors.push(parsed.trim());
         }
       } catch {
-        allColors.push(...r.colors.split(",").map((c) => c.trim()).filter(Boolean));
+        allColors.push(...String(r.colors).split(",").map((c) => c.trim()).filter(Boolean));
       }
     });
 
-    // Deduplicate
     const uniqueColors = [...new Set(allColors)];
     res.json({ colors: uniqueColors });
   });
@@ -339,13 +390,12 @@ router.get("/colors", (req, res) => {
 
 /* -------------------- CATEGORIES + SUBCATEGORIES -------------------- */
 router.get("/categories", (req, res) => {
-  const { category } = req.query; // example: category=Men or Women
+  const { category } = req.query;
 
   const whereParts = ["category IS NOT NULL", "TRIM(category) != ''"];
   const params = [];
 
   if (category) {
-    // filter for category like 'Men' or 'Women'
     whereParts.push("category COLLATE NOCASE = ?");
     params.push(category);
   }
@@ -361,14 +411,11 @@ router.get("/categories", (req, res) => {
   db.all(sql, params, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
 
-    // group subcategories under each category
     const categoriesMap = {};
     rows.forEach(({ category, subcategory }) => {
       const cat = category?.trim() || "Uncategorized";
       const sub = subcategory?.trim() || "General";
-      if (!categoriesMap[cat]) {
-        categoriesMap[cat] = new Set();
-      }
+      if (!categoriesMap[cat]) categoriesMap[cat] = new Set();
       categoriesMap[cat].add(sub);
     });
 
@@ -381,46 +428,76 @@ router.get("/categories", (req, res) => {
   });
 });
 
-
 /* -------------------- GET SINGLE PRODUCT BY ID -------------------- */
-const parseField = (field) => {
-  if (!field) return [];
-  try {
-    return JSON.parse(field);
-  } catch {
-    return field.split(",").map((v) => v.trim());
-  }
-};
-
 router.get("/:id", (req, res) => {
   const { id } = req.params;
-
   const query = `SELECT * FROM products WHERE id = ?`;
 
-  db.get(query, [id], (err, row) => {
+  db.get(query, [id], async (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!row) return res.status(404).json({ error: "Product not found" });
 
-    row.sizes = parseField(row.sizes);
-    row.colors = parseField(row.colors);
-    row.images = parseField(row.images);
+    // parse legacy fields
+    const sizesFromField = parseField(row.sizes); // could be ["S","M"] or objects depending on DB
+    const colors = parseField(row.colors);
+    const images = parseField(row.images);
 
-    res.json(row);
+    // fetch product_sizes
+    const sizesArr = await getSizesForProduct(row.id); // [{size,stock},...]
+    const sizeStockMap = {};
+    sizesArr.forEach((s) => {
+      if (s && s.size) sizeStockMap[String(s.size)] = Number(s.stock || 0);
+    });
+
+    // If product_sizes is empty but row.sizes contains objects [{size,stock}], try to derive
+    if (sizesArr.length === 0 && Array.isArray(sizesFromField) && sizesFromField.length) {
+      // sizesFromField may be ["S","M"] OR [{size,stock}] OR ["S:10"]
+      const fallbackMap = {};
+      sizesFromField.forEach((it) => {
+        if (!it) return;
+        if (typeof it === "string") {
+          const part = it.trim();
+          if (part.includes(":") || part.includes("=")) {
+            const [size, qty] = part.split(/[:=]/).map((s) => s && s.trim());
+            if (size) fallbackMap[size] = Number(qty) || 0;
+          } else {
+            fallbackMap[part] = fallbackMap[part] || 0;
+          }
+        } else if (typeof it === "object") {
+          const size = it.size ?? it.size_name ?? it.name ?? it.label;
+          const qty = Number(it.stock ?? it.qty ?? it.quantity ?? 0) || 0;
+          if (size) fallbackMap[size] = qty;
+        }
+      });
+      Object.assign(sizeStockMap, fallbackMap);
+    }
+
+    const totalStock = Object.values(sizeStockMap).reduce((acc, v) => acc + Number(v || 0), 0);
+
+    res.json({
+      ...row,
+      id: Number(row.id),
+      sizes: Array.isArray(sizesFromField) && sizesFromField.every((x) => typeof x === "string") && sizesFromField.length ? sizesFromField : Object.keys(sizeStockMap),
+      sizeRows: sizesArr,
+      sizeStock, // object map (might be empty)
+      size_stock: JSON.stringify(sizeStockMap),
+      totalStock,
+      colors,
+      images,
+      stock: Number(row.stock) || totalStock,
+    });
   });
 });
 
 /* -------------------- RELATED PRODUCTS -------------------- */
 router.get("/related/:id", (req, res) => {
   const { id } = req.params;
-
-  // First, get the product’s category & subcategory
   const query = `SELECT category, subcategory FROM products WHERE id = ?`;
 
   db.get(query, [id], (err, product) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!product) return res.status(404).json({ error: "Product not found" });
 
-    // Fetch related products in the same category/subcategory, excluding the current one
     const relatedQuery = `
       SELECT id, name, category, subcategory, images, price, rating
       FROM products
@@ -429,32 +506,45 @@ router.get("/related/:id", (req, res) => {
       LIMIT 8
     `;
 
-    db.all(relatedQuery, [product.category, product.subcategory, id], (err, rows) => {
+    db.all(relatedQuery, [product.category, product.subcategory, id], async (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
 
-      const normalized = rows.map((r) => ({
-        ...r,
-        id: Number(r.id),
-        price: r.price !== null ? Number(r.price) : null,
-        rating: r.rating !== null ? Number(r.rating) : null,
-        images: (() => {
-          if (!r.images) return [];
-          try {
-            const parsed = JSON.parse(r.images);
-            return Array.isArray(parsed) ? parsed : [parsed];
-          } catch {
-            return r.images.split(",").map((s) => s.trim());
-          }
-        })(),
-      }));
+      const enriched = await Promise.all(
+        (rows || []).map(async (r) => {
+          const images = (() => {
+            if (!r.images) return [];
+            try {
+              const parsed = JSON.parse(r.images);
+              return Array.isArray(parsed) ? parsed : [parsed];
+            } catch {
+              return String(r.images).split(",").map((s) => s.trim()).filter(Boolean);
+            }
+          })();
 
-      res.json(normalized);
+          const sizesArr = await getSizesForProduct(r.id);
+          const sizeStock = {};
+          sizesArr.forEach((s) => {
+            if (s && s.size) sizeStock[String(s.size)] = Number(s.stock || 0);
+          });
+          const totalStock = Object.values(sizeStock).reduce((acc, v) => acc + Number(v || 0), 0);
+
+          return {
+            ...r,
+            id: Number(r.id),
+            price: r.price !== null ? Number(r.price) : null,
+            rating: r.rating !== null ? Number(r.rating) : null,
+            images,
+            sizes: sizesArr.map((s) => s.size),
+            sizeStock,
+            size_stock: JSON.stringify(sizeStock),
+            totalStock,
+          };
+        })
+      );
+
+      res.json(enriched);
     });
   });
 });
 
 export default router;
-
-
-
-
