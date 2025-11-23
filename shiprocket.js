@@ -9,6 +9,15 @@ const API_BASE = "https://apiv2.shiprocket.in/v1/external";
 let cachedToken = null;
 let tokenExpiry = null;
 
+const safeJson = (v, max = 2000) => {
+  try {
+    const s = JSON.stringify(v, null, 2);
+    return s.length > max ? s.slice(0, max) + "...(truncated)" : s;
+  } catch {
+    return String(v);
+  }
+};
+
 /**
  * Authenticate and get Shiprocket token (cached ~23h)
  */
@@ -25,8 +34,12 @@ async function getToken() {
     { headers: { "Content-Type": "application/json" }, timeout: 10000 }
   );
 
-  const token = res?.data?.token;
-  if (!token) throw new Error("Auth succeeded but token missing in response");
+  // Shiprocket may return token in different shapes
+  const token = res?.data?.token || res?.data?.data?.token || res?.data?.auth_token || null;
+  if (!token) {
+    console.error("Auth response (no token):", safeJson(res?.data));
+    throw new Error("Auth succeeded but token missing in response");
+  }
 
   cachedToken = token;
   tokenExpiry = new Date(Date.now() + 23 * 60 * 60 * 1000); // 23h
@@ -37,13 +50,13 @@ async function getToken() {
  * Compute weights (actual, volumetric, chargeable)
  */
 function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divisor = 5000 }) {
-  const actualWeight = parseFloat(weight) || 0;
+  const actualWeight = Number.parseFloat(weight) || 0;
   let volumetricWeight = 0;
 
   if (length && breadth && height) {
-    const l = parseFloat(length) || 0;
-    const b = parseFloat(breadth) || 0;
-    const h = parseFloat(height) || 0;
+    const l = Number.parseFloat(length) || 0;
+    const b = Number.parseFloat(breadth) || 0;
+    const h = Number.parseFloat(height) || 0;
     if (l > 0 && b > 0 && h > 0) {
       volumetricWeight = (l * b * h) / volumetric_divisor;
     }
@@ -53,7 +66,7 @@ function computeWeights({ weight = 1.0, length, breadth, height, volumetric_divi
   const chargeable = Math.max(actualWeight, volumetricWeight, minimum);
 
   return {
-    actualWeight,
+    actualWeight: Number(actualWeight.toFixed(3)),
     volumetricWeight: Number(volumetricWeight.toFixed(3)),
     applicableWeight: Number(chargeable.toFixed(3)),
   };
@@ -186,7 +199,7 @@ async function calculateRates(opts = {}) {
     }));
   } catch (err) {
     const remote = err.response?.data || err.message;
-    console.error("Shiprocket calculateRates Error:", remote);
+    console.error("Shiprocket calculateRates Error:", safeJson(remote));
     throw new Error("Failed to calculate rates: " + (remote?.message || remote));
   }
 }
@@ -253,7 +266,7 @@ async function checkServiceability(destPincode, opts = {}) {
     }));
   } catch (err) {
     const remote = err.response?.data || err.message;
-    console.error("Shiprocket Serviceability Error:", remote);
+    console.error("Shiprocket Serviceability Error:", safeJson(remote));
     throw new Error("Failed to check serviceability: " + (remote?.message || remote));
   }
 }
@@ -271,7 +284,7 @@ async function createOrder(orderPayload) {
     return res.data;
   } catch (err) {
     const remote = err.response?.data || err.message;
-    console.error("Shiprocket createOrder Error:", remote);
+    console.error("Shiprocket createOrder Error:", safeJson(remote));
     throw new Error("Failed to create order: " + (remote?.message || remote));
   }
 }
@@ -289,7 +302,7 @@ async function updateOrder(orderPayload) {
     return res.data;
   } catch (err) {
     const remote = err.response?.data || err.message;
-    console.error("Shiprocket updateOrder Error:", remote);
+    console.error("Shiprocket updateOrder Error:", safeJson(remote));
     throw new Error("Failed to update order: " + (remote?.message || remote));
   }
 }
@@ -310,23 +323,21 @@ async function cancelOrder(shiprocketOrderIds) {
       { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
     );
 
-    if (!res.data.success) {
-      throw new Error("Shiprocket API failed to cancel order: " + JSON.stringify(res.data));
+    if (!res.data?.success) {
+      console.error("Cancel response:", safeJson(res.data));
+      throw new Error("Shiprocket API failed to cancel order: " + safeJson(res.data));
     }
 
     return res.data;
   } catch (err) {
     const remote = err.response?.data || err.message;
-    console.error("Shiprocket cancelOrder Error:", remote);
+    console.error("Shiprocket cancelOrder Error:", safeJson(remote));
     throw new Error("Failed to cancel order: " + (remote?.message || remote));
   }
 }
 
 /**
  * Generate invoice for a Shiprocket order
- * Example:
- *   const invoice = await generateInvoice(shiprocket_order_id);
- *   console.log(invoice.invoice_url);
  */
 async function generateInvoice(shiprocket_order_id) {
   if (!shiprocket_order_id) {
@@ -348,15 +359,9 @@ async function generateInvoice(shiprocket_order_id) {
       }
     );
 
-    // Example response:
-    // {
-    //   "is_invoice_created": true,
-    //   "invoice_url": "https://s3-ap-southeast-1.amazonaws.com/kr-shipmultichannel/...pdf",
-    //   "not_created": []
-    // }
-
     const data = res.data || {};
     if (!data.is_invoice_created || !data.invoice_url) {
+      console.error("Invoice generation response:", safeJson(data));
       throw new Error("Invoice generation failed or invoice URL not returned");
     }
 
@@ -367,17 +372,22 @@ async function generateInvoice(shiprocket_order_id) {
     };
   } catch (err) {
     const remote = err.response?.data || err.message;
-    console.error("Shiprocket generateInvoice Error:", remote);
+    console.error("Shiprocket generateInvoice Error:", safeJson(remote));
     throw new Error("Failed to generate invoice: " + (remote?.message || remote));
   }
 }
 
-
 /**
- * Track a Shiprocket order using Shiprocket's order_id
- * Example:
- *   const tracking = await trackOrder(237157589);
- *   console.log(tracking.current_status);
+ * Track an order using Shiprocket API and return a normalized tracking object.
+ *
+ * Accepts variety of Shiprocket response shapes and returns:
+ * {
+ *   track_status, shipment_status, current_status, courier_name, awb_code, ...
+ *   shipment_track, shipment_track_activities, latest_activity, raw, full_response
+ * }
+ *
+ * @param {Object} params
+ * @param {string|number} params.order_id - Shiprocket numeric order_id OR channel_order_id (TEMP-xxxx)
  */
 async function trackOrder({ order_id }) {
   if (!order_id) {
@@ -387,7 +397,7 @@ async function trackOrder({ order_id }) {
   const token = await getToken();
 
   try {
-    const url = `${API_BASE}/courier/track?order_id=${order_id}`;
+    const url = `${API_BASE}/courier/track?order_id=${encodeURIComponent(order_id)}`;
 
     const res = await axios.get(url, {
       headers: {
@@ -399,45 +409,155 @@ async function trackOrder({ order_id }) {
 
     const resData = res.data;
 
-    // Shiprocket returns [{ 'order_id': { tracking_data: {...} } }]
-    let trackingObj;
-    if (Array.isArray(resData) && resData.length > 0 && resData[0][order_id]) {
-      trackingObj = resData[0][order_id].tracking_data;
+    // Helper: try to extract tracking_data from a single element (array or object)
+    const extractFromElement = (el) => {
+      if (!el || typeof el !== "object") return null;
+
+      // direct keys
+      if (el.tracking_data) return el.tracking_data;
+      if (el.tracking) return el.tracking;
+      if (el.trackingData) return el.trackingData;
+
+      // Case: { [order_id]: { tracking_data: {...} } }
+      // order_id might be number or string; check both
+      const keysToTry = [String(order_id), Number(order_id)].filter((k) => k !== "NaN");
+      for (const k of keysToTry) {
+        if (el[k] && el[k].tracking_data) return el[k].tracking_data;
+        if (el[k] && el[k].tracking) return el[k].tracking;
+      }
+
+      // scan nested objects to find first tracking_data
+      for (const k of Object.keys(el)) {
+        const v = el[k];
+        if (v && typeof v === "object" && (v.tracking_data || v.tracking || v.trackingData)) {
+          return v.tracking_data || v.tracking || v.trackingData;
+        }
+      }
+
+      return null;
+    };
+
+    let trackingObj = null;
+
+    // If array, scan elements
+    if (Array.isArray(resData)) {
+      for (const el of resData) {
+        trackingObj = extractFromElement(el);
+        if (trackingObj) break;
+      }
+
+      // If still not found, maybe resData itself is array of tracking_data objects
+      if (!trackingObj && resData.length === 1 && typeof resData[0] === "object") {
+        trackingObj = extractFromElement(resData[0]) || resData[0].tracking_data || resData[0].tracking || null;
+      }
+    } else if (resData && typeof resData === "object") {
+      trackingObj = extractFromElement(resData) || resData.tracking_data || resData.tracking || null;
     }
 
     if (!trackingObj) {
-      console.error("Shiprocket API response:", resData);
+      console.error("Shiprocket API response (unexpected shape):", safeJson(resData));
       throw new Error("Tracking data not found in Shiprocket response");
     }
 
-    const shipment = Array.isArray(trackingObj.shipment_track) ? trackingObj.shipment_track[0] : {};
-    const activities = Array.isArray(trackingObj.shipment_track_activities) ? trackingObj.shipment_track_activities : [];
+    // Normalize shipments and activities
+    const shipments = Array.isArray(trackingObj.shipment_track) ? trackingObj.shipment_track : [];
+    const activities = Array.isArray(trackingObj.shipment_track_activities)
+      ? trackingObj.shipment_track_activities
+      : [];
+
+    // Helper to parse possible timestamp fields on activity
+    const getActivityTime = (activity) => {
+      if (!activity || typeof activity !== "object") return 0;
+      const candidates = [
+        activity.created_at,
+        activity.updated_at,
+        activity.activity_date,
+        activity.activity_time,
+        activity.time,
+        activity.date,
+        activity.timestamp,
+      ];
+      for (const c of candidates) {
+        if (!c) continue;
+        const t = Date.parse(String(c));
+        if (!Number.isNaN(t)) return t;
+      }
+      // fallback: try numeric timestamp fields
+      for (const key of Object.keys(activity)) {
+        const val = activity[key];
+        if (typeof val === "number" && val > 1000000000) return val;
+      }
+      return 0;
+    };
+
+    // Determine "primary" shipment - prefer one with an AWB or the first element
+    let primaryShipment = null;
+    if (shipments.length === 1) {
+      primaryShipment = shipments[0];
+    } else if (shipments.length > 1) {
+      primaryShipment = shipments.find((s) => s.awb_code || s.awb) || shipments[0];
+    } else {
+      primaryShipment = {};
+    }
+
+    // Determine latest activity (from shipment_track_activities OR per-shipment activity arrays)
+    let latestActivity = null;
+    if (activities.length > 0) {
+      latestActivity = activities.reduce((best, a) => {
+        return getActivityTime(a) > getActivityTime(best) ? a : best;
+      }, activities[0]);
+    } else {
+      // maybe each shipment has its own activity arrays
+      const allShipmentActs = [];
+      for (const s of shipments) {
+        if (Array.isArray(s.activities)) allShipmentActs.push(...s.activities);
+        if (Array.isArray(s.shipment_track_activities)) allShipmentActs.push(...s.shipment_track_activities);
+      }
+      if (allShipmentActs.length > 0) {
+        latestActivity = allShipmentActs.reduce((best, a) => {
+          return getActivityTime(a) > getActivityTime(best) ? a : best;
+        }, allShipmentActs[0]);
+      }
+    }
+
+    // Compose normalized current status
+    const currentStatus =
+      primaryShipment.current_status ||
+      latestActivity?.activity ||
+      latestActivity?.status ||
+      latestActivity?.message ||
+      (typeof trackingObj.track_status !== "undefined" ? String(trackingObj.track_status) : "Unknown");
 
     return {
-      track_status: trackingObj.track_status,
-      shipment_status: trackingObj.shipment_status,
-      current_status: shipment.current_status || activities[0]?.activity || "Unknown",
-      courier_name: shipment.courier_name || "Unknown",
-      awb_code: shipment.awb_code || null,
-      delivered_to: shipment.delivered_to || null,
-      destination: shipment.destination || null,
-      origin: shipment.origin || null,
-      consignee_name: shipment.consignee_name || null,
+      // Basic shiprocket fields
+      track_status: trackingObj.track_status ?? null,
+      shipment_status: trackingObj.shipment_status ?? null,
+      current_status: currentStatus,
+      courier_name: primaryShipment.courier_name || primaryShipment.courier || null,
+      awb_code: primaryShipment.awb_code || primaryShipment.awb || null,
+      delivered_to: primaryShipment.delivered_to || null,
+      destination: primaryShipment.destination || null,
+      origin: primaryShipment.origin || null,
+      consignee_name: primaryShipment.consignee_name || null,
       etd: trackingObj.etd || null,
       track_url: trackingObj.track_url || null,
-      shipment_track: trackingObj.shipment_track || [],
-      shipment_track_activities: trackingObj.shipment_track_activities || [],
+
+      // Raw arrays for UI/logging
+      shipment_track: shipments,
+      shipment_track_activities: activities,
+      latest_activity: latestActivity || null,
+
+      // for debugging: return the whole tracking object Shiprocket returned
       raw: trackingObj,
+      // include full raw response in case it's nested differently
+      full_response: resData,
     };
   } catch (err) {
-    const remote = err.response?.data || err.message;
-    console.error("Shiprocket trackOrder Error:", remote);
-    throw new Error("Failed to track order: " + (remote?.message || remote));
+    const remote = err.response?.data || err.message || err;
+    console.error("Shiprocket trackOrder Error:", safeJson(remote));
+    throw new Error("Failed to track order: " + (remote?.message || safeJson(remote)));
   }
 }
-
-
-
 
 export {
   getToken,
@@ -447,7 +567,7 @@ export {
   createOrder,
   updateOrder,
   cancelOrder,
-   trackOrder,
+  trackOrder,
   generateInvoice,
 };
 
