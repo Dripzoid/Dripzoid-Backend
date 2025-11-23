@@ -167,7 +167,7 @@ router.post("/place-order", auth, async (req, res) => {
       return res.status(500).json({ error: "Shiprocket order creation failed", details: err?.message || String(err) });
     }
 
-    const shiprocketOrderId = srOrder.order_id;
+    const shiprocketOrderId = srOrder.channel_order_id;
 
     // --- Step 3: Insert order and items into DB ---
     await runQuery("BEGIN TRANSACTION");
@@ -240,5 +240,6 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
 
 
