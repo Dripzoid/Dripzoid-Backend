@@ -174,7 +174,7 @@ router.post("/place-order", auth, async (req, res) => {
 
     const orderInsert = await runQuery(
       `INSERT INTO orders 
-         (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, shiprocket_order_id, delivery_date, created_at)
+         (user_id, address_id, shipping_address, payment_method, payment_details, total_amount, status, shiprocketOrderId, delivery_date, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'Confirmed', ?, ?, datetime('now','localtime'))`,
       [
         userId,
@@ -240,3 +240,4 @@ router.post("/place-order", auth, async (req, res) => {
 });
 
 export default router;
+
