@@ -40,6 +40,9 @@ import otpRoutes from "./OtpVerification.js";
 
 import shippingRoutes from "./shipping.js";
 
+import couponsRoutes from "./coupons.js";
+
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -1009,6 +1012,10 @@ app.use("/api/qa", qaRouter);
 app.use("/api/votes", votesRouter);
 app.use("/api/shipping", shippingRoutes);
 
+// -------------------- Coupon Routes --------------------
+app.use("/api/coupons", couponsRoutes);
+
+
 // -------------------- Root + Health --------------------
 app.get("/", (req, res) => res.send(`<h2>Dripzoid Backend</h2><p>API available. Use /api routes.</p>`));
 app.get("/test-env", (req, res) =>
@@ -1043,4 +1050,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
