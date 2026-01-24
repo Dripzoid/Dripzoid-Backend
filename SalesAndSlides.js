@@ -167,7 +167,7 @@ router.get("/public/sales/:id/details", (req, res) => {
 // =============================
 // CLOUDINARY IMAGE UPLOAD
 // =============================
-router.post("/upload", authAdmin, upload.single("image"), async (req, res) => {
+router.post("/admin/upload", authAdmin, upload.single("image"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
@@ -190,7 +190,7 @@ router.post("/upload", authAdmin, upload.single("image"), async (req, res) => {
 // =============================
 
 // GET all slides (admin)
-router.get("/slides", authAdmin, async (req, res) => {
+router.get("/admin/slides", authAdmin, async (req, res) => {
   try {
     const slides = await new Promise((resolve, reject) => {
       db.all(
@@ -206,7 +206,7 @@ router.get("/slides", authAdmin, async (req, res) => {
 });
 
 // ADD new slide (admin)
-router.post("/slides", authAdmin, async (req, res) => {
+router.post("/admin/slides", authAdmin, async (req, res) => {
   try {
     const { name, image_url, link } = req.body;
     if (!name || !image_url)
@@ -228,7 +228,7 @@ router.post("/slides", authAdmin, async (req, res) => {
 });
 
 // UPDATE slide (admin)
-router.put("/slides/:id", authAdmin, async (req, res) => {
+router.put("/admin/slides/:id", authAdmin, async (req, res) => {
   try {
     const { name, image_url, link, order_index } = req.body;
     const { id } = req.params;
@@ -251,7 +251,7 @@ router.put("/slides/:id", authAdmin, async (req, res) => {
 });
 
 // SOFT DELETE slide (admin)
-router.delete("/slides/:id", authAdmin, async (req, res) => {
+router.delete("/admin/slides/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     db.run(`UPDATE slides SET is_deleted = 1 WHERE id = ?`, [id], async function (err) {
@@ -270,7 +270,7 @@ router.delete("/slides/:id", authAdmin, async (req, res) => {
 // =============================
 
 // GET all sales (admin)
-router.get("/sales", authAdmin, async (req, res) => {
+router.get("/admin/sales", authAdmin, async (req, res) => {
   try {
     db.all(`SELECT * FROM sales WHERE is_deleted = 0`, (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
@@ -283,7 +283,7 @@ router.get("/sales", authAdmin, async (req, res) => {
 });
 
 // CREATE sale (admin)
-router.post("/sales", authAdmin, async (req, res) => {
+router.post("/admin/sales", authAdmin, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: "Sale name required" });
@@ -300,7 +300,7 @@ router.post("/sales", authAdmin, async (req, res) => {
 });
 
 // UPDATE sale (admin)
-router.put("/sales/:id", authAdmin, async (req, res) => {
+router.put("/admin/sales/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, enabled } = req.body;
@@ -325,7 +325,7 @@ router.put("/sales/:id", authAdmin, async (req, res) => {
 });
 
 // SOFT DELETE sale (admin)
-router.delete("/sales/:id", authAdmin, async (req, res) => {
+router.delete("/admin/sales/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     db.run(`UPDATE sales SET is_deleted = 1 WHERE id = ?`, [id], async function (err) {
@@ -344,7 +344,7 @@ router.delete("/sales/:id", authAdmin, async (req, res) => {
 // =============================
 
 // Add products to sale (admin)
-router.post("/sales/:sale_id/products", authAdmin, async (req, res) => {
+router.post("/admin/sales/:sale_id/products", authAdmin, async (req, res) => {
   try {
     const { sale_id } = req.params;
     const { product_ids } = req.body;
@@ -368,7 +368,7 @@ router.post("/sales/:sale_id/products", authAdmin, async (req, res) => {
 });
 
 // Remove product from sale (admin)
-router.delete("/sales/:sale_id/products/:product_id", authAdmin, async (req, res) => {
+router.delete("/admin/sales/:sale_id/products/:product_id", authAdmin, async (req, res) => {
   try {
     const { sale_id, product_id } = req.params;
     db.run(
@@ -389,7 +389,7 @@ router.delete("/sales/:sale_id/products/:product_id", authAdmin, async (req, res
 // =============================
 // GET Sale Details with Products (ADMIN)
 // =============================
-router.get("/sales/:id/details", authAdmin, async (req, res) => {
+router.get("/admin/sales/:id/details", authAdmin, async (req, res) => {
   const { id } = req.params;
   try {
     db.get(`SELECT * FROM sales WHERE id = ?`, [id], (err, sale) => {
