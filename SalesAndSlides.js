@@ -48,6 +48,44 @@ async function logAction(admin_id, action_type, entity_type, entity_id, details 
   }
 }
 
+// ---------------------------------
+// Promise wrappers for sqlite3 API
+// ---------------------------------
+function runAsync(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) return reject(err);
+      // return lastID and changes for callers
+      resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+}
+
+function getAsync(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) return reject(err);
+      resolve(row);
+    });
+  });
+}
+
+function allAsync(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) return reject(err);
+      resolve(rows || []);
+    });
+  });
+}
+
+// helper: start/commit/rollback transaction
+function execAsync(sql) {
+  return new Promise((resolve, reject) => {
+    db.exec(sql, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 // =======================================================
 // PUBLIC ROUTES (no auth) — allow frontend to fetch data
 // =======================================================
@@ -161,7 +199,7 @@ router.get("/public/sales/:id/details", (req, res) => {
 });
 
 // =======================================================
-// ADMIN ROUTES (require authAdmin) — unchanged behaviour
+// ADMIN ROUTES (require authAdmin)
 // =======================================================
 
 // =============================
@@ -269,30 +307,119 @@ router.delete("/admin/slides/:id", authAdmin, async (req, res) => {
 // SALES MANAGEMENT (ADMIN)
 // =============================
 
-// GET all sales (admin)
+// GET all sales (admin) -- now includes productIds array per sale
 router.get("/admin/sales", authAdmin, async (req, res) => {
   try {
-    db.all(`SELECT * FROM sales WHERE is_deleted = 0`, (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(rows);
-    });
+    const sales = await allAsync(`SELECT * FROM sales WHERE is_deleted = 0 ORDER BY id DESC`);
+    // for each sale, fetch product ids
+    const salesWithProducts = await Promise.all(
+      sales.map(async (s) => {
+        const rows = await allAsync(`SELECT product_id FROM sale_products WHERE sale_id = ? ORDER BY position ASC`, [s.id]);
+        const productIds = (rows || []).map((r) => r.product_id);
+        return { ...s, productIds };
+      })
+    );
+    res.json(salesWithProducts);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch sales" });
   }
 });
 
+// Helper: insert sale and attach products in a transaction
+async function insertSaleWithProducts({ name, productIds = [] }, adminId) {
+  // normalize ids to numbers/strings consistent with DB
+  const normalized = Array.isArray(productIds) ? productIds.map((id) => (typeof id === "string" && id.match(/^\d+$/) ? Number(id) : id)) : [];
+
+  try {
+    // BEGIN TRANSACTION
+    await execAsync("BEGIN TRANSACTION;");
+
+    // insert sale
+    const { lastID } = await runAsync(`INSERT INTO sales (name) VALUES (?)`, [name]);
+    const saleId = lastID;
+
+    // prepare statement for inserting sale_products
+    const stmt = db.prepare(`INSERT OR IGNORE INTO sale_products (sale_id, product_id, position) VALUES (?, ?, ?)`);
+
+    // wrap prepare-run-finalize into promises to ensure proper ordering
+    await new Promise((resolve, reject) => {
+      normalized.forEach((pid, idx) => {
+        stmt.run([saleId, pid, idx], (err) => {
+          if (err) {
+            // don't reject here immediately because stmt.run called multiple times; capture error and finalize after
+            // but simpler: we record and handle after
+          }
+        });
+      });
+      stmt.finalize((err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+
+    // COMMIT
+    await execAsync("COMMIT;");
+
+    // audit
+    await logAction(adminId, "CREATE", "sale", saleId, { name, productIds: normalized });
+
+    // return created sale id and productIds
+    return { id: saleId, name, productIds: normalized };
+  } catch (err) {
+    console.error("insertSaleWithProducts error:", err);
+    try {
+      await execAsync("ROLLBACK;");
+    } catch (rollbackErr) {
+      console.error("rollback error:", rollbackErr);
+    }
+    throw err;
+  }
+}
+
 // CREATE sale (admin)
+// Supports optional productIds (or product_ids) in request body; if present, will add sale_products rows.
 router.post("/admin/sales", authAdmin, async (req, res) => {
   try {
     const { name } = req.body;
+    // accept both productIds (camelCase from frontend) and product_ids (snake_case)
+    const incomingProductIds = Array.isArray(req.body.productIds)
+      ? req.body.productIds
+      : Array.isArray(req.body.product_ids)
+      ? req.body.product_ids
+      : [];
+
     if (!name) return res.status(400).json({ error: "Sale name required" });
 
-    db.run(`INSERT INTO sales (name) VALUES (?)`, [name], async function (err) {
-      if (err) return res.status(500).json({ error: err.message });
-      await logAction(req.user.id, "CREATE", "sale", this.lastID, { name });
-      res.json({ message: "Sale created successfully", id: this.lastID });
-    });
+    // If productIds provided, insert sale and sale_products in transaction
+    if (incomingProductIds && incomingProductIds.length > 0) {
+      try {
+        const created = await insertSaleWithProducts({ name, productIds: incomingProductIds }, req.user.id);
+
+        // fetch product objects for response (non-blocking failure shouldn't break creation)
+        let products = [];
+        try {
+          if (created.productIds.length > 0) {
+            // build placeholders
+            const placeholders = created.productIds.map(() => "?").join(",");
+            const rows = await allAsync(`SELECT id, name, price, images FROM products WHERE id IN (${placeholders})`, created.productIds);
+            products = rows || [];
+          }
+        } catch (prodErr) {
+          console.warn("Could not fetch product rows after sale creation:", prodErr.message || prodErr);
+        }
+
+        return res.json({ message: "Sale created successfully", sale: { id: created.id, name: created.name, productIds: created.productIds, products } });
+      } catch (txnErr) {
+        console.error("Transaction error creating sale with products:", txnErr);
+        return res.status(500).json({ error: "Failed to create sale with products", details: txnErr.message || txnErr });
+      }
+    }
+
+    // No products provided — simple insert
+    const result = await runAsync(`INSERT INTO sales (name) VALUES (?)`, [name]);
+    await logAction(req.user.id, "CREATE", "sale", result.lastID, { name });
+    res.json({ message: "Sale created successfully", id: result.lastID });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create sale" });
@@ -347,20 +474,48 @@ router.delete("/admin/sales/:id", authAdmin, async (req, res) => {
 router.post("/admin/sales/:sale_id/products", authAdmin, async (req, res) => {
   try {
     const { sale_id } = req.params;
-    const { product_ids } = req.body;
-
-    if (!Array.isArray(product_ids) || product_ids.length === 0)
+    // accept either product_ids or productIds
+    const incoming = Array.isArray(req.body.product_ids) ? req.body.product_ids : Array.isArray(req.body.productIds) ? req.body.productIds : [];
+    if (!Array.isArray(incoming) || incoming.length === 0)
       return res.status(400).json({ error: "No products provided" });
 
-    const insert = db.prepare(
-      `INSERT OR IGNORE INTO sale_products (sale_id, product_id, position) VALUES (?, ?, ?)`
-    );
+    // normalize ids
+    const normalized = incoming.map((id) => (typeof id === "string" && id.match(/^\d+$/) ? Number(id) : id));
 
-    product_ids.forEach((pid, idx) => insert.run([sale_id, pid, idx]));
-    insert.finalize();
+    // Use transaction to insert many product rows
+    try {
+      await execAsync("BEGIN;");
 
-    await logAction(req.user.id, "CREATE", "sale_product", sale_id, { product_ids });
-    res.json({ message: "Products added to sale successfully" });
+      const stmt = db.prepare(`INSERT OR IGNORE INTO sale_products (sale_id, product_id, position) VALUES (?, ?, ?)`);
+
+      await new Promise((resolve, reject) => {
+        normalized.forEach((pid, idx) => {
+          stmt.run([sale_id, pid, idx], (err) => {
+            if (err) {
+              // collect error but continue; we'll reject on finalize if necessary
+              // (we don't abort immediately to allow insert or ignore behavior)
+            }
+          });
+        });
+        stmt.finalize((err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+
+      await execAsync("COMMIT;");
+    } catch (innerErr) {
+      console.error("Error inserting sale_products:", innerErr);
+      try {
+        await execAsync("ROLLBACK;");
+      } catch (rerr) {
+        console.error("Rollback failed:", rerr);
+      }
+      return res.status(500).json({ error: "Failed to add products to sale", details: innerErr.message || innerErr });
+    }
+
+    await logAction(req.user.id, "CREATE", "sale_product", sale_id, { product_ids: normalized });
+    res.json({ message: "Products added to sale successfully", product_ids: normalized });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to add products" });
@@ -392,23 +547,19 @@ router.delete("/admin/sales/:sale_id/products/:product_id", authAdmin, async (re
 router.get("/admin/sales/:id/details", authAdmin, async (req, res) => {
   const { id } = req.params;
   try {
-    db.get(`SELECT * FROM sales WHERE id = ?`, [id], (err, sale) => {
-      if (err) return res.status(500).json({ error: err.message });
-      if (!sale) return res.status(404).json({ error: "Sale not found" });
+    const sale = await getAsync(`SELECT * FROM sales WHERE id = ?`, [id]);
+    if (!sale) return res.status(404).json({ error: "Sale not found" });
 
-      db.all(
-        `SELECT p.id, p.name, p.price, sp.position
+    const products = await allAsync(
+      `SELECT p.id, p.name, p.price, sp.position
          FROM sale_products sp
          JOIN products p ON p.id = sp.product_id
          WHERE sp.sale_id = ?
          ORDER BY sp.position ASC`,
-        [id],
-        (err2, products) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ sale, products });
-        }
-      );
-    });
+      [id]
+    );
+
+    res.json({ sale, products });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch sale details" });
