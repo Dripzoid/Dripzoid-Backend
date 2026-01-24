@@ -6,8 +6,8 @@ import fs from "fs";
 import dotenv from "dotenv";
 import { v2 as cloudinary } from "cloudinary";
 
-import db from "./db.js"; // ✅ Use centralized db connection
-import authAdmin from "./authAdmin.js"; // ✅ Admin auth middleware
+import db from "./db.js"; // centralized DB connection
+import authAdmin from "./authAdmin.js"; // admin auth middleware
 
 dotenv.config();
 
@@ -48,6 +48,122 @@ async function logAction(admin_id, action_type, entity_type, entity_id, details 
   }
 }
 
+// =======================================================
+// PUBLIC ROUTES (no auth) — allow frontend to fetch data
+// =======================================================
+
+/**
+ * GET /public/slides
+ * Public: return active slides for homepage hero
+ */
+router.get("/public/slides", (req, res) => {
+  const sql = `
+    SELECT id, name, COALESCE(image_url, '') AS image_url, COALESCE(link, '') AS link, order_index
+    FROM slides
+    WHERE is_deleted = 0
+    ORDER BY order_index ASC
+  `;
+  db.all(sql, [], (err, rows) => {
+    if (err) {
+      console.error("public/slides error:", err);
+      return res.status(500).json({ error: "Failed to fetch slides" });
+    }
+    // normalize to a simple shape for frontend
+    const slides = (rows || []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      src: r.image_url || "",
+      link: r.link || null,
+      order_index: r.order_index ?? 0,
+    }));
+    res.json(slides);
+  });
+});
+
+/**
+ * GET /public/sales
+ * Public: return enabled sales (active banners)
+ */
+router.get("/public/sales", (req, res) => {
+  const sql = `
+    SELECT id, name, COALESCE(image_url, '') AS image_url, COALESCE(subtitle, '') AS subtitle, COALESCE(enabled, 0) AS enabled
+    FROM sales
+    WHERE is_deleted = 0 AND enabled = 1
+    ORDER BY id DESC
+  `;
+  db.all(sql, [], (err, rows) => {
+    if (err) {
+      console.error("public/sales error:", err);
+      return res.status(500).json({ error: "Failed to fetch sales" });
+    }
+    const sales = (rows || []).map((r) => ({
+      id: r.id,
+      title: r.name,
+      subtitle: r.subtitle || "",
+      image_url: r.image_url || "",
+      enabled: Boolean(r.enabled),
+    }));
+    res.json(sales);
+  });
+});
+
+/**
+ * GET /public/sales/:id/details
+ * Public: return sale metadata and associated products (lightweight)
+ */
+router.get("/public/sales/:id/details", (req, res) => {
+  const { id } = req.params;
+  db.get(`SELECT id, name, COALESCE(image_url, '') AS image_url, COALESCE(enabled, 0) AS enabled FROM sales WHERE id = ? AND is_deleted = 0`, [id], (err, sale) => {
+    if (err) {
+      console.error("public/sales/:id/details error:", err);
+      return res.status(500).json({ error: "Failed to fetch sale" });
+    }
+    if (!sale) return res.status(404).json({ error: "Sale not found" });
+    if (!sale.enabled) return res.status(404).json({ error: "Sale not available" });
+
+    const sql = `
+      SELECT p.id, p.name, p.price, p.originalPrice, p.images, p.rating
+      FROM sale_products sp
+      JOIN products p ON p.id = sp.product_id
+      WHERE sp.sale_id = ?
+      ORDER BY sp.position ASC
+      LIMIT 100
+    `;
+    db.all(sql, [id], (err2, rows) => {
+      if (err2) {
+        console.error("public/sales/:id/details products error:", err2);
+        return res.status(500).json({ error: "Failed to fetch sale products" });
+      }
+
+      const products = (rows || []).map((r) => {
+        let images = [];
+        if (r.images) {
+          try {
+            const parsed = JSON.parse(r.images);
+            images = Array.isArray(parsed) ? parsed : [parsed];
+          } catch {
+            images = String(r.images).split(",").map((s) => s.trim()).filter(Boolean);
+          }
+        }
+        return {
+          id: r.id,
+          name: r.name,
+          price: r.price !== null ? Number(r.price) : null,
+          originalPrice: r.originalPrice !== null ? Number(r.originalPrice) : null,
+          rating: r.rating !== null ? Number(r.rating) : null,
+          images,
+        };
+      });
+
+      res.json({ sale: { id: sale.id, title: sale.name, image_url: sale.image_url }, products });
+    });
+  });
+});
+
+// =======================================================
+// ADMIN ROUTES (require authAdmin) — unchanged behaviour
+// =======================================================
+
 // =============================
 // CLOUDINARY IMAGE UPLOAD
 // =============================
@@ -70,10 +186,10 @@ router.post("/upload", authAdmin, upload.single("image"), async (req, res) => {
 });
 
 // =============================
-// SLIDES MANAGEMENT
+// SLIDES MANAGEMENT (ADMIN)
 // =============================
 
-// GET all slides
+// GET all slides (admin)
 router.get("/slides", authAdmin, async (req, res) => {
   try {
     const slides = await new Promise((resolve, reject) => {
@@ -89,7 +205,7 @@ router.get("/slides", authAdmin, async (req, res) => {
   }
 });
 
-// ADD new slide
+// ADD new slide (admin)
 router.post("/slides", authAdmin, async (req, res) => {
   try {
     const { name, image_url, link } = req.body;
@@ -111,7 +227,7 @@ router.post("/slides", authAdmin, async (req, res) => {
   }
 });
 
-// UPDATE slide
+// UPDATE slide (admin)
 router.put("/slides/:id", authAdmin, async (req, res) => {
   try {
     const { name, image_url, link, order_index } = req.body;
@@ -129,11 +245,12 @@ router.put("/slides/:id", authAdmin, async (req, res) => {
       }
     );
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to update slide" });
   }
 });
 
-// SOFT DELETE slide
+// SOFT DELETE slide (admin)
 router.delete("/slides/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -143,15 +260,16 @@ router.delete("/slides/:id", authAdmin, async (req, res) => {
       res.json({ message: "Slide deleted (soft) successfully" });
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to delete slide" });
   }
 });
 
 // =============================
-// SALES MANAGEMENT
+// SALES MANAGEMENT (ADMIN)
 // =============================
 
-// GET all sales
+// GET all sales (admin)
 router.get("/sales", authAdmin, async (req, res) => {
   try {
     db.all(`SELECT * FROM sales WHERE is_deleted = 0`, (err, rows) => {
@@ -159,11 +277,12 @@ router.get("/sales", authAdmin, async (req, res) => {
       res.json(rows);
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to fetch sales" });
   }
 });
 
-// CREATE sale
+// CREATE sale (admin)
 router.post("/sales", authAdmin, async (req, res) => {
   try {
     const { name } = req.body;
@@ -175,11 +294,12 @@ router.post("/sales", authAdmin, async (req, res) => {
       res.json({ message: "Sale created successfully", id: this.lastID });
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to create sale" });
   }
 });
 
-// UPDATE sale
+// UPDATE sale (admin)
 router.put("/sales/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -199,11 +319,12 @@ router.put("/sales/:id", authAdmin, async (req, res) => {
       }
     );
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to update sale" });
   }
 });
 
-// SOFT DELETE sale
+// SOFT DELETE sale (admin)
 router.delete("/sales/:id", authAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -213,15 +334,16 @@ router.delete("/sales/:id", authAdmin, async (req, res) => {
       res.json({ message: "Sale soft-deleted successfully" });
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to delete sale" });
   }
 });
 
 // =============================
-// SALE PRODUCTS MANAGEMENT
+// SALE PRODUCTS MANAGEMENT (ADMIN)
 // =============================
 
-// Add products to sale
+// Add products to sale (admin)
 router.post("/sales/:sale_id/products", authAdmin, async (req, res) => {
   try {
     const { sale_id } = req.params;
@@ -245,7 +367,7 @@ router.post("/sales/:sale_id/products", authAdmin, async (req, res) => {
   }
 });
 
-// Remove product from sale
+// Remove product from sale (admin)
 router.delete("/sales/:sale_id/products/:product_id", authAdmin, async (req, res) => {
   try {
     const { sale_id, product_id } = req.params;
@@ -259,12 +381,13 @@ router.delete("/sales/:sale_id/products/:product_id", authAdmin, async (req, res
       }
     );
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to remove product" });
   }
 });
 
 // =============================
-// GET Sale Details with Products
+// GET Sale Details with Products (ADMIN)
 // =============================
 router.get("/sales/:id/details", authAdmin, async (req, res) => {
   const { id } = req.params;
@@ -287,6 +410,7 @@ router.get("/sales/:id/details", authAdmin, async (req, res) => {
       );
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to fetch sale details" });
   }
 });
