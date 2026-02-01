@@ -84,13 +84,11 @@ function safeParseImages(imagesField) {
 ====================================================== */
 router.get("/public/sales", async (req, res) => {
   try {
-    // Query params: limit (sales), productsPerSale
     const limit = Math.max(1, Math.min(50, parseInt(req.query.limit || "10", 10)));
     const productsPerSale = Math.max(1, Math.min(50, parseInt(req.query.productsPerSale || "12", 10)));
 
-    // Fetch enabled sales
     const sales = await allAsync(
-      `SELECT id, name, COALESCE(image_url, '') AS image_url, COALESCE(subtitle, '') AS subtitle
+      `SELECT id, name
        FROM sales
        WHERE is_deleted = 0 AND enabled = 1
        ORDER BY id DESC
@@ -98,7 +96,6 @@ router.get("/public/sales", async (req, res) => {
       [limit]
     );
 
-    // For each sale fetch limited products
     const enriched = await Promise.all(
       sales.map(async (s) => {
         const prods = await allAsync(
@@ -111,22 +108,18 @@ router.get("/public/sales", async (req, res) => {
           [s.id, productsPerSale]
         );
 
-        const products = (prods || []).map((p) => ({
-          id: p.id,
-          name: p.name,
-          price: p.price !== null ? Number(p.price) : null,
-          originalPrice: p.originalPrice !== null ? Number(p.originalPrice) : null,
-          images: safeParseImages(p.images),
-          thumbnail: p.thumbnail || (safeParseImages(p.images)[0] || null),
-        }));
-
         return {
           id: s.id,
           title: s.name,
-          subtitle: s.subtitle || "",
-          image_url: s.image_url || "",
-          productCount: products.length,
-          products,
+          productCount: prods.length,
+          products: prods.map(p => ({
+            id: p.id,
+            name: p.name,
+            price: p.price !== null ? Number(p.price) : null,
+            originalPrice: p.originalPrice !== null ? Number(p.originalPrice) : null,
+            images: safeParseImages(p.images),
+            thumbnail: p.thumbnail || safeParseImages(p.images)[0] || null
+          }))
         };
       })
     );
@@ -137,6 +130,7 @@ router.get("/public/sales", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch public sales" });
   }
 });
+
 
 /* ======================================================
    OTHER PUBLIC ROUTES (slides, sale details)
@@ -158,32 +152,41 @@ router.get("/public/slides", async (req, res) => {
 router.get("/public/sales/:id/details", async (req, res) => {
   try {
     const id = req.params.id;
-    const sale = await getAsync(`SELECT id, name, COALESCE(image_url,'') AS image_url, COALESCE(enabled,0) AS enabled FROM sales WHERE id = ? AND is_deleted = 0`, [id]);
-    if (!sale) return res.status(404).json({ error: "Sale not found" });
-    if (!sale.enabled) return res.status(404).json({ error: "Sale not available" });
 
-    const prods = await allAsync(
+    const sale = await getAsync(
+      `SELECT id, name
+       FROM sales
+       WHERE id = ? AND is_deleted = 0 AND enabled = 1`,
+      [id]
+    );
+
+    if (!sale) return res.status(404).json({ error: "Sale not found" });
+
+    const products = await allAsync(
       `SELECT p.id, p.name, p.price, p.originalPrice, p.images, p.rating
        FROM sale_products sp
        JOIN products p ON p.id = sp.product_id
        WHERE sp.sale_id = ?
-       ORDER BY sp.position ASC
-       LIMIT 500`,
+       ORDER BY sp.position ASC`,
       [id]
     );
 
-    const products = (prods || []).map((r) => ({
-      id: r.id,
-      name: r.name,
-      price: r.price !== null ? Number(r.price) : null,
-      originalPrice: r.originalPrice !== null ? Number(r.originalPrice) : null,
-      rating: r.rating !== null ? Number(r.rating) : null,
-      images: safeParseImages(r.images),
-    }));
-
-    res.json({ sale: { id: sale.id, title: sale.name, image_url: sale.image_url }, products });
+    res.json({
+      sale: {
+        id: sale.id,
+        title: sale.name
+      },
+      products: products.map(p => ({
+        id: p.id,
+        name: p.name,
+        price: p.price !== null ? Number(p.price) : null,
+        originalPrice: p.originalPrice !== null ? Number(p.originalPrice) : null,
+        rating: p.rating !== null ? Number(p.rating) : null,
+        images: safeParseImages(p.images)
+      }))
+    });
   } catch (err) {
-    console.error("/public/sales/:id/details error:", err);
+    console.error("sale details error:", err);
     res.status(500).json({ error: "Failed to fetch sale details" });
   }
 });
