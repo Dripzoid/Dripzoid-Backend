@@ -80,7 +80,7 @@ function safeParseImages(imagesField) {
 
 /* ======================================================
    PUBLIC ROUTES (mounted under /api if your app uses /api)
-   GET /public/sales  -> for homepage \"On Sale\" section
+   GET /public/sales  -> for homepage "On Sale" section
 ====================================================== */
 router.get("/public/sales", async (req, res) => {
   try {
@@ -99,7 +99,7 @@ router.get("/public/sales", async (req, res) => {
     const enriched = await Promise.all(
       sales.map(async (s) => {
         const prods = await allAsync(
-          `SELECT p.id, p.name, p.price, p.originalPrice, p.images, p.thumbnail
+          `SELECT p.id, p.name, p.price, p.originalPrice, p.images
            FROM sale_products sp
            JOIN products p ON p.id = sp.product_id
            WHERE sp.sale_id = ?
@@ -108,18 +108,23 @@ router.get("/public/sales", async (req, res) => {
           [s.id, productsPerSale]
         );
 
-        return {
-          id: s.id,
-          title: s.name,
-          productCount: prods.length,
-          products: prods.map(p => ({
+        const products = (prods || []).map((p) => {
+          const images = safeParseImages(p.images);
+          return {
             id: p.id,
             name: p.name,
             price: p.price !== null ? Number(p.price) : null,
             originalPrice: p.originalPrice !== null ? Number(p.originalPrice) : null,
-            images: safeParseImages(p.images),
-            thumbnail: p.thumbnail || safeParseImages(p.images)[0] || null
-          }))
+            images,
+            thumbnail: images[0] || null,
+          };
+        });
+
+        return {
+          id: s.id,
+          title: s.name,
+          productCount: products.length,
+          products,
         };
       })
     );
@@ -130,7 +135,6 @@ router.get("/public/sales", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch public sales" });
   }
 });
-
 
 /* ======================================================
    OTHER PUBLIC ROUTES (slides, sale details)
@@ -171,19 +175,25 @@ router.get("/public/sales/:id/details", async (req, res) => {
       [id]
     );
 
-    res.json({
-      sale: {
-        id: sale.id,
-        title: sale.name
-      },
-      products: products.map(p => ({
+    const mapped = (products || []).map((p) => {
+      const images = safeParseImages(p.images);
+      return {
         id: p.id,
         name: p.name,
         price: p.price !== null ? Number(p.price) : null,
         originalPrice: p.originalPrice !== null ? Number(p.originalPrice) : null,
         rating: p.rating !== null ? Number(p.rating) : null,
-        images: safeParseImages(p.images)
-      }))
+        images,
+        thumbnail: images[0] || null,
+      };
+    });
+
+    res.json({
+      sale: {
+        id: sale.id,
+        title: sale.name,
+      },
+      products: mapped,
     });
   } catch (err) {
     console.error("sale details error:", err);
@@ -297,7 +307,9 @@ router.post("/admin/sales", authAdmin, async (req, res) => {
 
     if (productIds.length > 0) {
       const stmt = db.prepare(`INSERT OR IGNORE INTO sale_products (sale_id, product_id, position) VALUES (?, ?, ?)`);
+
       productIds.forEach((pid, idx) => stmt.run([saleId, pid, idx]));
+
       await new Promise((resolve, reject) => stmt.finalize((err) => (err ? reject(err) : resolve())));
     }
 
@@ -311,7 +323,10 @@ router.post("/admin/sales", authAdmin, async (req, res) => {
       if (productIds.length) {
         const placeholders = productIds.map(() => "?").join(",");
         products = await allAsync(`SELECT id, name, price, images FROM products WHERE id IN (${placeholders})`, productIds);
-        products = (products || []).map(p => ({ id: p.id, name: p.name, price: p.price !== null ? Number(p.price) : null, images: safeParseImages(p.images) }));
+        products = (products || []).map(p => {
+          const images = safeParseImages(p.images);
+          return { id: p.id, name: p.name, price: p.price !== null ? Number(p.price) : null, images, thumbnail: images[0] || null };
+        });
       }
     } catch (fetchErr) {
       console.warn("Could not fetch product rows after creation:", fetchErr);
