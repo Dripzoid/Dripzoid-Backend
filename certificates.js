@@ -108,7 +108,7 @@ router.post(
 
       // Upload certificate PDF
       const certUpload = await uploadBufferToCloudinary(certFile.buffer, {
-        resource_type: "raw",
+        resource_type: "image",
         folder: "certificates",
         public_id: certificate_id,
         format: "pdf",
