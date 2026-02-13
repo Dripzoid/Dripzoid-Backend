@@ -1,37 +1,22 @@
 // routes/certificates.js
 import express from "express";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
+import cloudinary from "../cloudinary.js";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
-import { fileURLToPath } from "url";
+import path from "path";
 
 const router = express.Router();
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const upload = multer({ storage: multer.memoryStorage() });
 
-// DB path — adapt to your project
-const DB_PATH = process.env.DATABASE_FILE || path.join(__dirname, "../dripzoid.db");
-
-// Ensure upload directories
-const CERT_UPLOAD_DIR = path.join(process.cwd(), "uploads", "certificates");
-fs.mkdirSync(CERT_UPLOAD_DIR, { recursive: true });
-
-// multer storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, CERT_UPLOAD_DIR),
-  filename: (req, file, cb) =>
-    cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, "_")}`),
-});
-const upload = multer({ storage });
-
-// Open DB (simple)
+// DB
 let db;
 (async () => {
-  db = await open({ filename: DB_PATH, driver: sqlite3.Database });
+  db = await open({
+    filename: process.env.DATABASE_FILE || "./dripzoid.db",
+    driver: sqlite3.Database,
+  });
 
-  // Create certificates table if not exists
   await db.exec(`
     CREATE TABLE IF NOT EXISTS certificates (
       id TEXT PRIMARY KEY,
@@ -44,54 +29,95 @@ let db;
       certificate_url TEXT,
       qr_url TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
+    )
   `);
 })();
 
 // POST /api/certificates
-router.post("/", upload.fields([{ name: "certificate" }, { name: "qr" }]), async (req, res) => {
-  try {
-    const {
-      application_id,
-      certificate_id,
-      intern_name,
-      role,
-      start_date,
-      end_date,
-      issue_date,
-    } = req.body;
-
-    if (!application_id || !certificate_id || !intern_name) {
-      return res.status(400).json({ message: "Missing required fields" });
-    }
-
-    const certFile = req.files?.certificate?.[0];
-    const qrFile = req.files?.qr?.[0];
-
-    const certificate_url = certFile ? `/uploads/certificates/${path.basename(certFile.path)}` : null;
-    const qr_url = qrFile ? `/uploads/certificates/${path.basename(qrFile.path)}` : null;
-
-    await db.run(
-      `INSERT INTO certificates (id, application_id, intern_name, role, start_date, end_date, issue_date, certificate_url, qr_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        certificate_id,
+router.post(
+  "/",
+  upload.fields([{ name: "certificate" }, { name: "qr" }]),
+  async (req, res) => {
+    try {
+      const {
         application_id,
+        certificate_id,
         intern_name,
         role,
         start_date,
         end_date,
         issue_date,
+      } = req.body;
+
+      if (!application_id || !certificate_id || !intern_name) {
+        return res.status(400).json({ message: "Missing required fields" });
+      }
+
+      const certFile = req.files?.certificate?.[0];
+      const qrFile = req.files?.qr?.[0];
+
+      // Upload PDF as RAW file
+      let certificate_url = null;
+      if (certFile) {
+        const uploadPdf = await cloudinary.uploader.upload_stream(
+          {
+            resource_type: "raw",
+            folder: "certificates",
+            public_id: certificate_id,
+            format: "pdf",
+          },
+          (error, result) => {
+            if (error) throw error;
+            certificate_url = result.secure_url;
+          }
+        );
+        uploadPdf.end(certFile.buffer);
+      }
+
+      // Upload QR as image
+      let qr_url = null;
+      if (qrFile) {
+        const uploadQr = await cloudinary.uploader.upload_stream(
+          {
+            folder: "certificates/qr",
+            public_id: certificate_id + "-qr",
+          },
+          (error, result) => {
+            if (error) throw error;
+            qr_url = result.secure_url;
+          }
+        );
+        uploadQr.end(qrFile.buffer);
+      }
+
+      await db.run(
+        `INSERT INTO certificates
+        (id, application_id, intern_name, role, start_date, end_date, issue_date, certificate_url, qr_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          certificate_id,
+          application_id,
+          intern_name,
+          role,
+          start_date,
+          end_date,
+          issue_date,
+          certificate_url,
+          qr_url,
+        ]
+      );
+
+      res.json({
+        success: true,
+        certificate_id,
         certificate_url,
         qr_url,
-      ]
-    );
-
-    return res.json({ message: "Certificate saved", certificate_id, certificate_url, qr_url });
-  } catch (err) {
-    console.error("certificates POST error:", err);
-    return res.status(500).json({ message: "Failed to save certificate" });
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Failed to upload certificate" });
+    }
   }
-});
+);
 
 export default router;
