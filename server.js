@@ -35,6 +35,7 @@ import adminOrdersRoutes from "./adminOrders.js";
 import reviewsRouter from "./reviews.js";
 import qaRouter from "./qa.js";
 import votesRouter from "./votes.js";
+import jobsRoutes from "./jobs.js";
 
 import otpRoutes from "./OtpVerification.js";
 
@@ -1011,6 +1012,7 @@ app.use("/api/reviews", reviewsRouter);
 app.use("/api/qa", qaRouter);
 app.use("/api/votes", votesRouter);
 app.use("/api/shipping", shippingRoutes);
+app.use("/api/jobs", jobsRoutes);
 
 // -------------------- Coupon Routes --------------------
 app.use("/api/coupons", couponsRoutes);
@@ -1050,6 +1052,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
