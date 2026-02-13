@@ -1,7 +1,7 @@
 // routes/certificates.js
 import express from "express";
 import multer from "multer";
-import cloudinary from "../cloudinary.js";
+import cloudinary from "./cloudinary.js";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import path from "path";
