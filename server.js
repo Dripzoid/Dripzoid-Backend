@@ -80,6 +80,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// -------------------- Serve Uploaded Resumes --------------------
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "uploads"))
+);
+
+
 // -------------------- Request Logger --------------------
 app.use((req, res, next) => {
   const start = Date.now();
@@ -1052,6 +1059,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT} (NODE_ENV=${process.env.NODE_ENV || "development"})`));
 
 export { app, db };
+
 
 
 
