@@ -115,12 +115,15 @@ router.post(
          Upload PDF (IMPORTANT: use resource_type: "raw")
          ===================================================== */
       const certUpload = await uploadBufferToCloudinary(certFile.buffer, {
-        resource_type: "raw", // ✅ Correct for PDFs
-        folder: "certificates",
-        public_id: certificate_id,
-        format: "pdf",
-        overwrite: true,
-      });
+  resource_type: "raw",
+  folder: "certificates",
+  public_id: certificate_id,
+  format: "pdf",
+  overwrite: true,
+  access_mode: "public",
+  type: "upload",
+});
+;
 
       const certificate_url = certUpload.secure_url;
       const certificate_download_url = certUpload.secure_url.replace(
