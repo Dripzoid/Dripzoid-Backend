@@ -9,7 +9,9 @@ import path from "path";
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper: upload buffer to Cloudinary via upload_stream wrapped in Promise
+/* =========================================================
+   Helper: Upload buffer to Cloudinary (Promise wrapper)
+   ========================================================= */
 function uploadBufferToCloudinary(buffer, options = {}) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(options, (error, result) => {
@@ -20,7 +22,9 @@ function uploadBufferToCloudinary(buffer, options = {}) {
   });
 }
 
-// DB init + ensure schema
+/* =========================================================
+   DB init + ensure schema
+   ========================================================= */
 let db;
 (async () => {
   db = await open({
@@ -28,7 +32,7 @@ let db;
     driver: sqlite3.Database,
   });
 
-  // Create certificates table
+  // Certificates table
   await db.exec(`
     CREATE TABLE IF NOT EXISTS certificates (
       id TEXT PRIMARY KEY,
@@ -62,7 +66,7 @@ let db;
 })();
 
 /* =========================================================
-   POST /api/certificates  → create & upload certificate
+   POST /api/certificates → Upload Certificate + QR
    ========================================================= */
 router.post(
   "/",
@@ -85,17 +89,18 @@ router.post(
         });
       }
 
-      // Prevent duplicate certificates
-      const existingByApp = await db.get(
+      // Prevent duplicate certificate for same application
+      const existing = await db.get(
         "SELECT * FROM certificates WHERE application_id = ?",
         [application_id]
       );
-      if (existingByApp) {
+
+      if (existing) {
         return res.status(200).json({
           message: "Certificate already exists",
-          certificate_id: existingByApp.id,
-          certificate_url: existingByApp.certificate_url,
-          qr_url: existingByApp.qr_url,
+          certificate_id: existing.id,
+          certificate_url: existing.certificate_url,
+          qr_url: existing.qr_url,
         });
       }
 
@@ -106,9 +111,11 @@ router.post(
         return res.status(400).json({ message: "Certificate PDF required" });
       }
 
-      // Upload certificate PDF
+      /* =====================================================
+         Upload PDF (IMPORTANT: use resource_type: "raw")
+         ===================================================== */
       const certUpload = await uploadBufferToCloudinary(certFile.buffer, {
-        resource_type: "image",
+        resource_type: "raw", // ✅ Correct for PDFs
         folder: "certificates",
         public_id: certificate_id,
         format: "pdf",
@@ -116,8 +123,14 @@ router.post(
       });
 
       const certificate_url = certUpload.secure_url;
+      const certificate_download_url = certUpload.secure_url.replace(
+        "/upload/",
+        "/upload/fl_attachment/"
+      );
 
-      // Upload QR image
+      /* =====================================================
+         Upload QR image
+         ===================================================== */
       let qr_url = null;
       if (qrFile) {
         const qrUpload = await uploadBufferToCloudinary(qrFile.buffer, {
@@ -129,7 +142,9 @@ router.post(
         qr_url = qrUpload.secure_url;
       }
 
-      // Insert into DB
+      /* =====================================================
+         Save in DB
+         ===================================================== */
       await db.run(
         `INSERT INTO certificates
           (id, application_id, intern_name, role, start_date, end_date, issue_date, certificate_url, qr_url)
@@ -157,10 +172,11 @@ router.post(
         success: true,
         certificate_id,
         certificate_url,
+        certificate_download_url, // bonus direct download
         qr_url,
       });
     } catch (err) {
-      console.error(err);
+      console.error("Certificate Upload Error:", err);
       res.status(500).json({ message: "Failed to upload certificate" });
     }
   }
@@ -175,6 +191,7 @@ router.get("/application/:applicationId", async (req, res) => {
       "SELECT * FROM certificates WHERE application_id = ?",
       [req.params.applicationId]
     );
+
     if (!row) return res.status(404).json({ message: "Certificate not found" });
 
     res.json(row);
@@ -185,7 +202,7 @@ router.get("/application/:applicationId", async (req, res) => {
 });
 
 /* =========================================================
-   PUBLIC: JSON Verification (used by QR scan APIs)
+   PUBLIC JSON Verification
    GET /api/certificates/public/:certificateId
    ========================================================= */
 router.get("/public/:certificateId", async (req, res) => {
@@ -219,7 +236,7 @@ router.get("/public/:certificateId", async (req, res) => {
 });
 
 /* =========================================================
-   PUBLIC: HTML Verification Page (for QR scanning)
+   PUBLIC HTML Verification Page (QR redirect page)
    GET /api/certificates/public/view/:certificateId
    ========================================================= */
 router.get("/public/view/:certificateId", async (req, res) => {
@@ -244,6 +261,7 @@ router.get("/public/view/:certificateId", async (req, res) => {
           body { font-family: Arial; padding: 40px; text-align:center; }
           .card { max-width:600px;margin:auto;padding:30px;border:1px solid #eee;border-radius:12px; }
           .valid { color:green;font-size:24px;font-weight:bold; }
+          a { text-decoration:none;color:#2563eb;font-weight:bold; }
         </style>
       </head>
       <body>
