@@ -9,9 +9,7 @@ import path from "path";
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-/* =========================================================
-   Helper: Upload buffer to Cloudinary (Promise wrapper)
-   ========================================================= */
+// Helper: upload buffer to Cloudinary via upload_stream wrapped in Promise
 function uploadBufferToCloudinary(buffer, options = {}) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(options, (error, result) => {
@@ -22,9 +20,7 @@ function uploadBufferToCloudinary(buffer, options = {}) {
   });
 }
 
-/* =========================================================
-   DB init + ensure schema
-   ========================================================= */
+// DB init + ensure schema
 let db;
 (async () => {
   db = await open({
@@ -32,7 +28,7 @@ let db;
     driver: sqlite3.Database,
   });
 
-  // Certificates table
+  // Create certificates table
   await db.exec(`
     CREATE TABLE IF NOT EXISTS certificates (
       id TEXT PRIMARY KEY,
@@ -66,7 +62,7 @@ let db;
 })();
 
 /* =========================================================
-   POST /api/certificates → Upload Certificate + QR
+   POST /api/certificates → Upload Certificate Image + QR
    ========================================================= */
 router.post(
   "/",
@@ -108,28 +104,29 @@ router.post(
       const qrFile = req.files?.qr?.[0];
 
       if (!certFile) {
-        return res.status(400).json({ message: "Certificate PDF required" });
+        return res.status(400).json({ message: "Certificate image required" });
       }
 
       /* =====================================================
-         Upload PDF (IMPORTANT: use resource_type: "raw")
+         Upload certificate image to Cloudinary (resource_type: image)
          ===================================================== */
       const certUpload = await uploadBufferToCloudinary(certFile.buffer, {
-  resource_type: "raw",
-  folder: "certificates",
-  public_id: certificate_id,
-  format: "pdf",
-  overwrite: true,
-  access_mode: "public",
-  type: "upload",
-});
-;
+        resource_type: "image",
+        folder: "certificates",
+        public_id: certificate_id,
+        overwrite: true,
+        access_mode: "public",
+        type: "upload",
+      });
 
-      const certificate_url = certUpload.secure_url;
-      const certificate_download_url = certUpload.secure_url.replace(
-        "/upload/",
-        "/upload/fl_attachment/"
-      );
+      const certificate_url = certUpload.secure_url || certUpload.url || null;
+
+      // Provide a download-forced URL (Cloudinary fl_attachment) for convenience
+      let certificate_download_url = null;
+      if (certificate_url) {
+        // replace the first occurrence of /upload/ with /upload/fl_attachment/
+        certificate_download_url = certificate_url.replace("/upload/", "/upload/fl_attachment/");
+      }
 
       /* =====================================================
          Upload QR image
@@ -142,7 +139,7 @@ router.post(
           public_id: `${certificate_id}-qr`,
           overwrite: true,
         });
-        qr_url = qrUpload.secure_url;
+        qr_url = qrUpload.secure_url || qrUpload.url || null;
       }
 
       /* =====================================================
@@ -175,7 +172,7 @@ router.post(
         success: true,
         certificate_id,
         certificate_url,
-        certificate_download_url, // bonus direct download
+        certificate_download_url,
         qr_url,
       });
     } catch (err) {
@@ -194,7 +191,6 @@ router.get("/application/:applicationId", async (req, res) => {
       "SELECT * FROM certificates WHERE application_id = ?",
       [req.params.applicationId]
     );
-
     if (!row) return res.status(404).json({ message: "Certificate not found" });
 
     res.json(row);
@@ -275,7 +271,7 @@ router.get("/public/view/:certificateId", async (req, res) => {
           <p><strong>Duration:</strong> ${row.start_date} → ${row.end_date}</p>
           <p><strong>Issued:</strong> ${row.issue_date}</p>
           <br/>
-          <a href="${row.certificate_url}" target="_blank">View Certificate PDF</a>
+          <a href="${row.certificate_url}" target="_blank">View Certificate</a>
         </div>
       </body>
       </html>
