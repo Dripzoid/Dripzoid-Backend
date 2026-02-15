@@ -244,8 +244,23 @@ router.get("/public/view/:certificateId", async (req, res) => {
       "SELECT * FROM certificates WHERE id = ?",
       [req.params.certificateId]
     );
+    
 
     const LOGO_URL = "https://res.cloudinary.com/dvid0uzwo/image/upload/v1771150544/my_project/lk1uulpgg3gdgi2fyfbp.png";
+        // helper to format DD-MM-YYYY
+    const formatDate = (dateStr) => {
+      if (!dateStr) return "-";
+      const d = new Date(dateStr);
+      if (isNaN(d)) return dateStr;
+      const dd = String(d.getDate()).padStart(2, "0");
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const yyyy = d.getFullYear();
+      return `${dd}-${mm}-${yyyy}`;
+    };
+
+    const startDate = formatDate(row.start_date);
+    const endDate = formatDate(row.end_date);
+    const issueDate = formatDate(row.issue_date);
 
     if (!row) {
       return res.send(`
@@ -321,16 +336,14 @@ router.get("/public/view/:certificateId", async (req, res) => {
       `);
     }
 
-    res.send(`
+   res.send(`
       <!DOCTYPE html>
       <html lang="en">
       <head>
         <meta charset="UTF-8"/>
         <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
         <title>Certificate Verification</title>
-
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
-
         <style>
           *{box-sizing:border-box;margin:0;padding:0}
           body{
@@ -343,123 +356,47 @@ router.get("/public/view/:certificateId", async (req, res) => {
             color:#0f172a;
             padding:20px;
           }
-
-          .wrapper{
-            width:100%;
-            max-width:700px;
-          }
-
+          .wrapper{width:100%;max-width:700px;}
           .brand{
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            gap:12px;
-            margin-bottom:24px;
-            color:white;
+            display:flex;align-items:center;justify-content:center;
+            gap:12px;margin-bottom:24px;color:white;
           }
-
-          .brand img{
-            height:52px;
-            object-fit:contain;
-          }
-
-          .brand span{
-            font-weight:700;
-            font-size:20px;
-            letter-spacing:0.5px;
-          }
-
+          .brand img{height:52px;object-fit:contain;}
+          .brand span{font-weight:700;font-size:20px;letter-spacing:0.5px;}
           .card{
-            position:relative;
-            border-radius:20px;
-            padding:36px 30px;
+            border-radius:20px;padding:36px 30px;
             background:rgba(255,255,255,0.92);
             backdrop-filter: blur(18px);
             box-shadow:0 20px 60px rgba(0,0,0,0.35);
             text-align:center;
-            animation:fadeIn 0.6s ease;
           }
-
-          @keyframes fadeIn{
-            from{opacity:0; transform:translateY(20px)}
-            to{opacity:1; transform:translateY(0)}
-          }
-
           .status{
-            display:inline-flex;
-            align-items:center;
-            gap:10px;
-            font-weight:700;
-            color:#16a34a;
-            background:#ecfdf5;
-            padding:10px 18px;
-            border-radius:999px;
-            margin-bottom:18px;
-            font-size:14px;
+            display:inline-flex;align-items:center;gap:10px;
+            font-weight:700;color:#16a34a;background:#ecfdf5;
+            padding:10px 18px;border-radius:999px;margin-bottom:18px;font-size:14px;
           }
-
-          .status::before{
-            content:"✔";
-            font-weight:900;
-          }
-
-          h2{
-            font-size:28px;
-            margin-bottom:12px;
-            color:#020617;
-          }
-
+          .status::before{content:"✔";font-weight:900;}
+          h2{font-size:28px;margin-bottom:12px;color:#020617;}
           .meta{
             margin-top:20px;
             display:grid;
             grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
-            gap:16px;
-            text-align:left;
+            gap:16px;text-align:left;
           }
-
           .meta div{
-            background:#f8fafc;
-            padding:14px 16px;
-            border-radius:12px;
-            border:1px solid #e2e8f0;
+            background:#f8fafc;padding:14px 16px;
+            border-radius:12px;border:1px solid #e2e8f0;
           }
-
-          .label{
-            font-size:12px;
-            font-weight:600;
-            color:#64748b;
-            margin-bottom:4px;
-          }
-
-          .value{
-            font-size:15px;
-            font-weight:600;
-            color:#0f172a;
-          }
-
+          .label{font-size:12px;font-weight:600;color:#64748b;margin-bottom:4px;}
+          .value{font-size:15px;font-weight:600;color:#0f172a;}
           .btn{
-            margin-top:28px;
-            display:inline-block;
-            padding:14px 26px;
-            border-radius:12px;
-            text-decoration:none;
-            font-weight:700;
-            background:#020617;
-            color:white;
-            transition:all .25s ease;
+            margin-top:28px;display:inline-block;padding:14px 26px;
+            border-radius:12px;text-decoration:none;font-weight:700;
+            background:#020617;color:white;transition:.25s ease;
             box-shadow:0 10px 25px rgba(0,0,0,0.25);
           }
-
-          .btn:hover{
-            transform:translateY(-2px);
-            box-shadow:0 14px 35px rgba(0,0,0,0.35);
-          }
-
-          .footer{
-            margin-top:22px;
-            font-size:12px;
-            color:#64748b;
-          }
+          .btn:hover{transform:translateY(-2px);box-shadow:0 14px 35px rgba(0,0,0,0.35);}
+          .footer{margin-top:22px;font-size:12px;color:#64748b;}
         </style>
       </head>
       <body>
@@ -481,11 +418,11 @@ router.get("/public/view/:certificateId", async (req, res) => {
               </div>
               <div>
                 <div class="label">Duration</div>
-                <div class="value">${row.start_date} → ${row.end_date}</div>
+                <div class="value">${startDate} → ${endDate}</div>
               </div>
               <div>
                 <div class="label">Issue Date</div>
-                <div class="value">${row.issue_date}</div>
+                <div class="value">${issueDate}</div>
               </div>
             </div>
 
