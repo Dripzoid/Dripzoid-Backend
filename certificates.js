@@ -247,31 +247,207 @@ router.get("/public/view/:certificateId", async (req, res) => {
 
     if (!row) {
       return res.send(`
-        <h2>❌ Certificate Not Found</h2>
-        <p>This certificate is invalid or does not exist.</p>
+        <html>
+        <head>
+          <title>Certificate Verification</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <style>
+            body{
+              margin:0;
+              font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;
+              display:flex;align-items:center;justify-content:center;
+              height:100vh;background:#0f172a;color:white;text-align:center;
+            }
+            .box{max-width:420px;padding:40px;border-radius:16px;background:rgba(255,255,255,0.05);backdrop-filter:blur(12px);}
+            h2{margin-bottom:10px}
+          </style>
+        </head>
+        <body>
+          <div class="box">
+            <h2>❌ Certificate Not Found</h2>
+            <p>This certificate is invalid or does not exist.</p>
+          </div>
+        </body>
+        </html>
       `);
     }
 
     res.send(`
-      <html>
+      <!DOCTYPE html>
+      <html lang="en">
       <head>
+        <meta charset="UTF-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
         <title>Certificate Verification</title>
+
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+
         <style>
-          body { font-family: Arial; padding: 40px; text-align:center; }
-          .card { max-width:600px;margin:auto;padding:30px;border:1px solid #eee;border-radius:12px; }
-          .valid { color:green;font-size:24px;font-weight:bold; }
-          a { text-decoration:none;color:#2563eb;font-weight:bold; }
+          *{box-sizing:border-box;margin:0;padding:0}
+          body{
+            font-family:'Inter',system-ui,-apple-system,Segoe UI,Roboto,Arial;
+            min-height:100vh;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            background: radial-gradient(circle at top, #1e293b, #020617);
+            color:#0f172a;
+            padding:20px;
+          }
+
+          .wrapper{
+            width:100%;
+            max-width:700px;
+          }
+
+          .brand{
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            gap:12px;
+            margin-bottom:24px;
+            color:white;
+          }
+
+          .brand img{
+            height:48px;
+            object-fit:contain;
+          }
+
+          .brand span{
+            font-weight:700;
+            font-size:20px;
+            letter-spacing:0.5px;
+          }
+
+          .card{
+            position:relative;
+            border-radius:20px;
+            padding:36px 30px;
+            background:rgba(255,255,255,0.9);
+            backdrop-filter: blur(18px);
+            box-shadow:0 20px 60px rgba(0,0,0,0.35);
+            text-align:center;
+            animation:fadeIn 0.6s ease;
+          }
+
+          @keyframes fadeIn{
+            from{opacity:0; transform:translateY(20px)}
+            to{opacity:1; transform:translateY(0)}
+          }
+
+          .status{
+            display:inline-flex;
+            align-items:center;
+            gap:10px;
+            font-weight:700;
+            color:#16a34a;
+            background:#ecfdf5;
+            padding:10px 18px;
+            border-radius:999px;
+            margin-bottom:18px;
+            font-size:14px;
+          }
+
+          .status::before{
+            content:"✔";
+            font-weight:900;
+          }
+
+          h2{
+            font-size:28px;
+            margin-bottom:12px;
+            color:#020617;
+          }
+
+          .meta{
+            margin-top:20px;
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+            gap:16px;
+            text-align:left;
+          }
+
+          .meta div{
+            background:#f8fafc;
+            padding:14px 16px;
+            border-radius:12px;
+            border:1px solid #e2e8f0;
+          }
+
+          .label{
+            font-size:12px;
+            font-weight:600;
+            color:#64748b;
+            margin-bottom:4px;
+          }
+
+          .value{
+            font-size:15px;
+            font-weight:600;
+            color:#0f172a;
+          }
+
+          .btn{
+            margin-top:28px;
+            display:inline-block;
+            padding:14px 26px;
+            border-radius:12px;
+            text-decoration:none;
+            font-weight:700;
+            background:#020617;
+            color:white;
+            transition:all .25s ease;
+            box-shadow:0 10px 25px rgba(0,0,0,0.25);
+          }
+
+          .btn:hover{
+            transform:translateY(-2px);
+            box-shadow:0 14px 35px rgba(0,0,0,0.35);
+          }
+
+          .footer{
+            margin-top:22px;
+            font-size:12px;
+            color:#64748b;
+          }
         </style>
       </head>
       <body>
-        <div class="card">
-          <div class="valid">✔ Certificate Verified</div>
-          <h2>${row.intern_name}</h2>
-          <p><strong>Role:</strong> ${row.role}</p>
-          <p><strong>Duration:</strong> ${row.start_date} → ${row.end_date}</p>
-          <p><strong>Issued:</strong> ${row.issue_date}</p>
-          <br/>
-          <a href="${row.certificate_url}" target="_blank">View Certificate</a>
+        <div class="wrapper">
+          <div class="brand">
+            <img src="https://res.cloudinary.com/dvid0uzwo/image/upload/v1765754948/my_project/hqp5nzma6ahyhmfecc6y.png" alt="Dripzoid Logo"/>
+            <span>Dripzoid Certificate Verification</span>
+          </div>
+
+          <div class="card">
+            <div class="status">Certificate Verified</div>
+
+            <h2>${row.intern_name}</h2>
+
+            <div class="meta">
+              <div>
+                <div class="label">Role</div>
+                <div class="value">${row.role || "-"}</div>
+              </div>
+              <div>
+                <div class="label">Duration</div>
+                <div class="value">${row.start_date} → ${row.end_date}</div>
+              </div>
+              <div>
+                <div class="label">Issue Date</div>
+                <div class="value">${row.issue_date}</div>
+              </div>
+            </div>
+
+            <a class="btn" href="${row.certificate_url}" target="_blank">
+              View Certificate
+            </a>
+
+            <div class="footer">
+              Verified digitally by Dripzoid • Authentic Internship Certificate
+            </div>
+          </div>
         </div>
       </body>
       </html>
@@ -281,5 +457,6 @@ router.get("/public/view/:certificateId", async (req, res) => {
     res.status(500).send("Verification failed");
   }
 });
+
 
 export default router;
