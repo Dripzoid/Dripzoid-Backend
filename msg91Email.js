@@ -4,7 +4,7 @@ import authMiddleware from "./authAdmin.js";
 
 const router = express.Router();
 
-const MSG91_AUTH_KEY = process.env.MSG91_AUTH_KEY;
+const MSG91_AUTH_KEY = process.env.MSG91_AUTHKEY;
 const MSG91_TEMPLATE_ID = process.env.MSG91_TEMPLATE_ID;
 
 /* =========================================================
