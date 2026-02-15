@@ -1,15 +1,21 @@
+import express from "express";
 import axios from "axios";
+import authMiddleware from "./authAdmin.js";
 
-const MSG91_AUTH_KEY = process.env.MSG91_AUTH_KEY; // from dashboard
-const MSG91_TEMPLATE_ID = process.env.MSG91_TEMPLATE_ID; // email template id
+const router = express.Router();
 
-export async function sendCertificateEmail({
+const MSG91_AUTH_KEY = process.env.MSG91_AUTH_KEY;
+const MSG91_TEMPLATE_ID = process.env.MSG91_TEMPLATE_ID;
+
+/* =========================================================
+   Helper: Send Email via MSG91
+   ========================================================= */
+async function sendCertificateEmail({
   to,
   internName,
   role,
   certificateImageUrl,
   certificateDownloadUrl,
-  verificationUrl,
 }) {
   try {
     const response = await axios.post(
@@ -26,7 +32,6 @@ export async function sendCertificateEmail({
           ROLE: role,
           PREVIEW_URL: certificateImageUrl,
           DOWNLOAD_URL: certificateDownloadUrl,
-          VERIFY_URL: verificationUrl,
         },
       },
       {
@@ -43,3 +48,43 @@ export async function sendCertificateEmail({
     throw error;
   }
 }
+
+/* =========================================================
+   POST /api/email/send-certificate
+   Triggered from Admin Dashboard button
+   ========================================================= */
+router.post("/send-certificate", authMiddleware, async (req, res) => {
+  try {
+    const {
+      to,
+      internName,
+      role,
+      certificateImageUrl,
+      certificateDownloadUrl,
+    } = req.body;
+
+    if (!to || !internName || !certificateImageUrl) {
+      return res.status(400).json({
+        message: "Missing required fields (to, internName, certificateImageUrl)",
+      });
+    }
+
+    await sendCertificateEmail({
+      to,
+      internName,
+      role,
+      certificateImageUrl,
+      certificateDownloadUrl,
+    });
+
+    res.json({
+      success: true,
+      message: "Certificate email sent successfully",
+    });
+  } catch (err) {
+    console.error("Email Route Error:", err);
+    res.status(500).json({ message: "Failed to send certificate email" });
+  }
+});
+
+export default router;
