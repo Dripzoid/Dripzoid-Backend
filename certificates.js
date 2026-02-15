@@ -245,27 +245,76 @@ router.get("/public/view/:certificateId", async (req, res) => {
       [req.params.certificateId]
     );
 
+    const LOGO_URL = "https://res.cloudinary.com/dvid0uzwo/image/upload/v1771150544/my_project/lk1uulpgg3gdgi2fyfbp.png";
+
     if (!row) {
       return res.send(`
+        <!DOCTYPE html>
         <html>
         <head>
           <title>Certificate Verification</title>
           <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
           <style>
+            *{box-sizing:border-box;margin:0;padding:0}
             body{
-              margin:0;
-              font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;
-              display:flex;align-items:center;justify-content:center;
-              height:100vh;background:#0f172a;color:white;text-align:center;
+              font-family:'Inter',system-ui,-apple-system,Segoe UI,Roboto,Arial;
+              min-height:100vh;
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              background: radial-gradient(circle at top, #1e293b, #020617);
+              color:white;
+              padding:20px;
             }
-            .box{max-width:420px;padding:40px;border-radius:16px;background:rgba(255,255,255,0.05);backdrop-filter:blur(12px);}
-            h2{margin-bottom:10px}
+            .wrapper{
+              width:100%;
+              max-width:600px;
+              text-align:center;
+            }
+            .brand{
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              gap:12px;
+              margin-bottom:24px;
+            }
+            .brand img{
+              height:52px;
+              object-fit:contain;
+            }
+            .brand span{
+              font-weight:700;
+              font-size:20px;
+              letter-spacing:.5px;
+            }
+            .card{
+              border-radius:20px;
+              padding:40px 30px;
+              background:rgba(255,255,255,0.08);
+              backdrop-filter:blur(18px);
+              box-shadow:0 20px 60px rgba(0,0,0,0.35);
+            }
+            h2{
+              font-size:26px;
+              margin-bottom:10px;
+            }
+            p{
+              font-size:15px;
+              color:#e2e8f0;
+            }
           </style>
         </head>
         <body>
-          <div class="box">
-            <h2>❌ Certificate Not Found</h2>
-            <p>This certificate is invalid or does not exist.</p>
+          <div class="wrapper">
+            <div class="brand">
+              <img src="${LOGO_URL}" alt="Dripzoid Logo"/>
+              <span>Dripzoid Certificate Verification</span>
+            </div>
+            <div class="card">
+              <h2>❌ Certificate Not Found</h2>
+              <p>This certificate is invalid, revoked, or does not exist in our records.</p>
+            </div>
           </div>
         </body>
         </html>
@@ -310,7 +359,7 @@ router.get("/public/view/:certificateId", async (req, res) => {
           }
 
           .brand img{
-            height:48px;
+            height:52px;
             object-fit:contain;
           }
 
@@ -324,7 +373,7 @@ router.get("/public/view/:certificateId", async (req, res) => {
             position:relative;
             border-radius:20px;
             padding:36px 30px;
-            background:rgba(255,255,255,0.9);
+            background:rgba(255,255,255,0.92);
             backdrop-filter: blur(18px);
             box-shadow:0 20px 60px rgba(0,0,0,0.35);
             text-align:center;
@@ -416,7 +465,7 @@ router.get("/public/view/:certificateId", async (req, res) => {
       <body>
         <div class="wrapper">
           <div class="brand">
-            <img src="https://res.cloudinary.com/dvid0uzwo/image/upload/v1765754948/my_project/hqp5nzma6ahyhmfecc6y.png" alt="Dripzoid Logo"/>
+            <img src="${LOGO_URL}" alt="Dripzoid Logo"/>
             <span>Dripzoid Certificate Verification</span>
           </div>
 
