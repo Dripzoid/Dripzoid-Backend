@@ -1,15 +1,15 @@
-// routes/certificates.js
 import express from "express";
 import multer from "multer";
 import cloudinary from "./cloudinary.js";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import path from "path";
+import authMiddleware from "../middleware/authMiddleware.js"; // <-- ADD THIS
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper: upload buffer to Cloudinary via upload_stream wrapped in Promise
+// Helper: upload buffer to Cloudinary
 function uploadBufferToCloudinary(buffer, options = {}) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(options, (error, result) => {
@@ -20,7 +20,9 @@ function uploadBufferToCloudinary(buffer, options = {}) {
   });
 }
 
-// DB init + ensure schema
+/* =========================================================
+   DB init + ensure schema
+   ========================================================= */
 let db;
 (async () => {
   db = await open({
@@ -28,7 +30,6 @@ let db;
     driver: sqlite3.Database,
   });
 
-  // Create certificates table
   await db.exec(`
     CREATE TABLE IF NOT EXISTS certificates (
       id TEXT PRIMARY KEY,
@@ -44,7 +45,6 @@ let db;
     )
   `);
 
-  // Ensure applications table has certificate_generated column
   const appsTable = await db.get(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='applications'"
   );
@@ -56,16 +56,16 @@ let db;
       await db.exec(
         `ALTER TABLE applications ADD COLUMN certificate_generated INTEGER DEFAULT 0`
       );
-      console.log("Added certificate_generated column to applications table");
     }
   }
 })();
 
 /* =========================================================
-   POST /api/certificates → Upload Certificate Image + QR
+   🔒 POST /api/certificates (ADMIN ONLY)
    ========================================================= */
 router.post(
   "/",
+  authMiddleware, // <-- PROTECTED
   upload.fields([{ name: "certificate", maxCount: 1 }, { name: "qr", maxCount: 1 }]),
   async (req, res) => {
     try {
@@ -85,14 +85,13 @@ router.post(
         });
       }
 
-      // Prevent duplicate certificate for same application
       const existing = await db.get(
         "SELECT * FROM certificates WHERE application_id = ?",
         [application_id]
       );
 
       if (existing) {
-        return res.status(200).json({
+        return res.json({
           message: "Certificate already exists",
           certificate_id: existing.id,
           certificate_url: existing.certificate_url,
@@ -107,30 +106,15 @@ router.post(
         return res.status(400).json({ message: "Certificate image required" });
       }
 
-      /* =====================================================
-         Upload certificate image to Cloudinary (resource_type: image)
-         ===================================================== */
       const certUpload = await uploadBufferToCloudinary(certFile.buffer, {
         resource_type: "image",
         folder: "certificates",
         public_id: certificate_id,
         overwrite: true,
-        access_mode: "public",
-        type: "upload",
       });
 
-      const certificate_url = certUpload.secure_url || certUpload.url || null;
+      const certificate_url = certUpload.secure_url;
 
-      // Provide a download-forced URL (Cloudinary fl_attachment) for convenience
-      let certificate_download_url = null;
-      if (certificate_url) {
-        // replace the first occurrence of /upload/ with /upload/fl_attachment/
-        certificate_download_url = certificate_url.replace("/upload/", "/upload/fl_attachment/");
-      }
-
-      /* =====================================================
-         Upload QR image
-         ===================================================== */
       let qr_url = null;
       if (qrFile) {
         const qrUpload = await uploadBufferToCloudinary(qrFile.buffer, {
@@ -139,12 +123,9 @@ router.post(
           public_id: `${certificate_id}-qr`,
           overwrite: true,
         });
-        qr_url = qrUpload.secure_url || qrUpload.url || null;
+        qr_url = qrUpload.secure_url;
       }
 
-      /* =====================================================
-         Save in DB
-         ===================================================== */
       await db.run(
         `INSERT INTO certificates
           (id, application_id, intern_name, role, start_date, end_date, issue_date, certificate_url, qr_url)
@@ -162,7 +143,6 @@ router.post(
         ]
       );
 
-      // Mark application as certificate generated
       await db.run(
         `UPDATE applications SET certificate_generated = 1 WHERE id = ?`,
         [application_id]
@@ -172,7 +152,6 @@ router.post(
         success: true,
         certificate_id,
         certificate_url,
-        certificate_download_url,
         qr_url,
       });
     } catch (err) {
@@ -183,26 +162,28 @@ router.post(
 );
 
 /* =========================================================
-   GET /api/certificates/application/:applicationId
+   🔒 GET certificate by application (ADMIN ONLY)
    ========================================================= */
-router.get("/application/:applicationId", async (req, res) => {
-  try {
-    const row = await db.get(
-      "SELECT * FROM certificates WHERE application_id = ?",
-      [req.params.applicationId]
-    );
-    if (!row) return res.status(404).json({ message: "Certificate not found" });
-
-    res.json(row);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch certificate" });
+router.get(
+  "/application/:applicationId",
+  authMiddleware, // <-- PROTECTED
+  async (req, res) => {
+    try {
+      const row = await db.get(
+        "SELECT * FROM certificates WHERE application_id = ?",
+        [req.params.applicationId]
+      );
+      if (!row) return res.status(404).json({ message: "Certificate not found" });
+      res.json(row);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Failed to fetch certificate" });
+    }
   }
-});
+);
 
 /* =========================================================
-   PUBLIC JSON Verification
-   GET /api/certificates/public/:certificateId
+   🌐 PUBLIC JSON Verification (NO AUTH)
    ========================================================= */
 router.get("/public/:certificateId", async (req, res) => {
   try {
