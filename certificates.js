@@ -433,7 +433,6 @@ router.get("/public/view/:certificateId", async (req, res) => {
    ========================================================= */
 router.get(
   "/:certificateId/download-pdf",
-  authMiddleware,
   async (req, res) => {
     try {
       const { certificateId } = req.params;
@@ -485,6 +484,7 @@ router.get(
     }
   }
 );
+
 
 
 
