@@ -4,7 +4,7 @@ import cloudinary from "./cloudinary.js";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import path from "path";
-import authMiddleware from "../middleware/authMiddleware.js"; // <-- ADD THIS
+import authMiddleware from "./authAdmin.js"; // <-- ADD THIS
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
