@@ -5,6 +5,8 @@ import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import path from "path";
 import authMiddleware from "./authAdmin.js"; // <-- ADD THIS
+import PDFDocument from "pdfkit";
+import fs from "fs";
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -424,6 +426,66 @@ router.get("/public/view/:certificateId", async (req, res) => {
     res.status(500).send("Verification failed");
   }
 });
+
+/* =========================================================
+   🔒 DOWNLOAD CERTIFICATE AS PDF (DIRECT STREAM, NO UPLOAD)
+   GET /api/certificates/:certificateId/download-pdf
+   ========================================================= */
+router.get(
+  "/:certificateId/download-pdf",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const { certificateId } = req.params;
+
+      // fetch certificate record
+      const row = await db.get(
+        "SELECT * FROM certificates WHERE id = ?",
+        [certificateId]
+      );
+
+      if (!row || !row.certificate_url) {
+        return res.status(404).json({ message: "Certificate image not found" });
+      }
+
+      const imageUrl = row.certificate_url;
+
+      // fetch image buffer from cloudinary
+      const imageResponse = await fetch(imageUrl);
+      const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+
+      // create PDF
+      const PDFDocument = (await import("pdfkit")).default;
+      const doc = new PDFDocument({
+        size: "A4",
+        layout: "landscape",
+        margin: 0,
+      });
+
+      // set headers for download
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${certificateId}.pdf"`
+      );
+
+      // pipe PDF directly to response
+      doc.pipe(res);
+
+      // add image full page
+      doc.image(imageBuffer, 0, 0, {
+        width: doc.page.width,
+        height: doc.page.height,
+      });
+
+      doc.end();
+    } catch (err) {
+      console.error("PDF Stream Error:", err);
+      res.status(500).json({ message: "Failed to generate PDF" });
+    }
+  }
+);
+
 
 
 export default router;
