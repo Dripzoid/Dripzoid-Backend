@@ -258,9 +258,6 @@ router.get("/public/view/:certificateId", async (req, res) => {
       return `${dd}-${mm}-${yyyy}`;
     };
 
-    const startDate = formatDate(row.start_date);
-    const endDate = formatDate(row.end_date);
-    const issueDate = formatDate(row.issue_date);
 
     if (!row) {
       return res.send(`
@@ -336,6 +333,9 @@ router.get("/public/view/:certificateId", async (req, res) => {
       `);
     }
 
+    const startDate = formatDate(row.start_date);
+    const endDate = formatDate(row.end_date);
+    const issueDate = formatDate(row.issue_date);
    res.send(`
       <!DOCTYPE html>
       <html lang="en">
