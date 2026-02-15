@@ -23,8 +23,8 @@ async function sendCertificateEmail({
       {
         to: [{ email: to, name: internName }],
         from: {
-          email: "noreply@dripzoid.com",
-          name: "Dripzoid",
+          email: "careers@dripzoid.com",
+          name: "Dripzoid Development Team",
         },
         template_id: MSG91_TEMPLATE_ID,
         variables: {
