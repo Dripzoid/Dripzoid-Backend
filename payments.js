@@ -46,7 +46,7 @@ if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
     "Warning: RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set in env. Razorpay endpoints will fail until set."
   );
 }
-
+console.log("RAZORPAY KEY:", process.env.RAZORPAY_KEY_ID);
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
