@@ -94,251 +94,218 @@ db.run(
   )`
 );
 
-// ---------------- CREATE RAZORPAY + SHIPROCKET ORDER ----------------
 router.post("/razorpay/create-order", auth, async (req, res) => {
   const { items, shipping, totalAmount } = req.body;
 
-  if (!items || !Array.isArray(items) || items.length === 0) {
+  if (!items?.length) {
     return res.status(400).json({ error: "No items provided" });
   }
 
-  const totalAmtNumber = Number(totalAmount);
-  if (!Number.isFinite(totalAmtNumber) || totalAmtNumber <= 0) {
-    return res.status(400).json({ error: "Invalid totalAmount" });
+  const amount = Math.round(Number(totalAmount) * 100);
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: "Invalid amount" });
   }
 
-  const amountPaise = Math.round(totalAmtNumber * 100);
-
   try {
-    const address = shipping || {};
-    const userName =
-      address.name ||
-      `${address.first_name || ""} ${address.last_name || ""}`.trim() ||
-      req.user?.name ||
-      `${req.user?.first_name || ""} ${req.user?.last_name || ""}`.trim() ||
-      "Customer";
-
-    const nameParts = userName.trim().split(/\s+/);
-    const firstName = nameParts[0] || "Customer";
-    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
-
-    let deliveryDate = null;
-    try {
-      const totalWeight = items.reduce((s, it) => s + (Number(it.weight || it.wt || 1) || 1), 0);
-      const svc = await checkServiceability(address.pincode || "000000", { weight: totalWeight });
-      if (Array.isArray(svc) && svc.length > 0) deliveryDate = svc[0].etd ?? svc[0].estimated_delivery ?? null;
-      else if (svc?.etd || svc?.estimated_delivery) deliveryDate = svc.etd ?? svc.estimated_delivery;
-    } catch (err) {
-      console.warn("Serviceability check failed:", err?.message || err);
-    }
-
-    const shiprocketPayload = {
-      order_id: `TEMP-${Date.now()}`,
-      order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
-      pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
-      channel_id: Number(process.env.SHIPROCKET_CHANNEL_ID || 1),
-      billing_customer_name: firstName,
-      billing_last_name: lastName,
-      billing_address: address.line1 || address.address || "N/A",
-      billing_address_2: address.line2 || "",
-      billing_city: address.city || "N/A",
-      billing_pincode: address.pincode || "000000",
-      billing_state: address.state || "N/A",
-      billing_country: address.country || "India",
-      billing_email: address.email || req.user?.email || "noreply@example.com",
-      billing_phone: address.phone || req.user?.phone || "0000000000",
-      shipping_is_billing: true,
-      order_items: items.map((i) => ({
-        name: i.name || `Product ${i.product_id}`,
-        sku: i.sku || `SKU-${i.product_id}`,
-        units: i.quantity,
-        selling_price: i.unit_price || i.price || 0,
-      })),
-      payment_method: "Prepaid",
-      sub_total: totalAmtNumber,
-      total_discount: 0,
-      length: 10,
-      breadth: 10,
-      height: 10,
-      weight: Math.max(0.5, items.reduce((s, it) => s + (Number(it.weight || 0) || 0), 0) || 0.5),
-    };
-
-    let shiprocketOrder;
-    try {
-      shiprocketOrder = await createShiprocketOrder(shiprocketPayload);
-      if (!shiprocketOrder?.order_id) {
-        return res.status(500).json({ error: "Shiprocket order creation failed" });
-      }
-    } catch (err) {
-      console.error("Shiprocket createOrder failed:", err?.message || err);
-      return res.status(500).json({ error: "Shiprocket order creation failed", details: err?.message || String(err) });
-    }
-
-    const shiprocketOrderId = shiprocketOrder.order_id;
-
-    const orderResult = await new Promise((resolve, reject) => {
+    const orderId = await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO orders (user_id, shipping_json, total_amount, status, shiprocket_order_id, delivery_date) 
-         VALUES (?, ?, ?, 'Pending', ?, ?)`,
-        [req.user.id, JSON.stringify(address), totalAmtNumber, shiprocketOrderId, deliveryDate],
+        `INSERT INTO orders (user_id, shipping_json, total_amount, status)
+         VALUES (?, ?, ?, 'Pending')`,
+        [req.user.id, JSON.stringify(shipping), totalAmount],
         function (err) {
           if (err) return reject(err);
-          resolve({ id: this.lastID });
+          resolve(this.lastID);
         }
       );
     });
 
+    // insert items
     for (const item of items) {
-      const unitPrice = Number(item.unit_price || item.price || 0);
-      const quantity = Number(item.quantity || 1);
       await new Promise((resolve, reject) => {
         db.run(
           `INSERT INTO order_items 
-           (order_id, product_id, quantity, unit_price, price, selectedColor, selectedSize) 
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (order_id, product_id, quantity, unit_price, price)
+           VALUES (?, ?, ?, ?, ?)`,
           [
-            orderResult.id,
+            orderId,
             item.product_id,
-            quantity,
-            unitPrice,
-            unitPrice * quantity,
-            item.selectedColor ?? null,
-            item.selectedSize ?? null,
+            item.quantity,
+            item.unit_price,
+            item.unit_price * item.quantity,
           ],
-          function (err) {
-            if (err) return reject(err);
-            resolve();
-          }
+          (err) => (err ? reject(err) : resolve())
         );
       });
     }
 
     const razorOrder = await razorpay.orders.create({
-      amount: amountPaise,
+      amount,
       currency: "INR",
-      receipt: `order_rcptid_${orderResult.id}`,
-      notes: { internalOrderId: orderResult.id.toString() },
+      receipt: `order_${orderId}`,
+      notes: { internalOrderId: orderId.toString() },
     });
 
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE orders 
-         SET razorpay_order_id = ?, razorpay_amount = ?, updated_at = CURRENT_TIMESTAMP 
-         WHERE id = ?`,
-        [razorOrder.id, razorOrder.amount, orderResult.id],
-        function (err) {
-          if (err) return reject(err);
-          resolve();
-        }
-      );
-    });
-
-    await new Promise((resolve, reject) => {
-      db.run(
-        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
-        [req.user.id, `Placed order #${orderResult.id}`],
-        function (err) {
-          if (err) return reject(err);
-          resolve();
-        }
-      );
-    });
+    await db.run(
+      `UPDATE orders 
+       SET razorpay_order_id = ?, razorpay_amount = ?
+       WHERE id = ?`,
+      [razorOrder.id, razorOrder.amount, orderId]
+    );
 
     res.json({
       success: true,
-      internalOrderId: orderResult.id,
+      internalOrderId: orderId,
       razorpayOrderId: razorOrder.id,
       amount: razorOrder.amount,
-      currency: razorOrder.currency,
-      shiprocketOrderId,
-      deliveryDate: deliveryDate ?? null,
     });
+
   } catch (err) {
-    console.error("Create order error:", err?.message || err);
-    res.status(500).json({ error: "Failed to create order", details: err?.message || String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Create order failed" });
   }
 });
 
 // ---------------- VERIFY RAZORPAY PAYMENT ----------------
 router.post("/razorpay/verify", auth, async (req, res) => {
-  const { razorpay_payment_id, razorpay_order_id, razorpay_signature, internalOrderId } = req.body;
-  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature || !internalOrderId) {
+  const {
+    razorpay_payment_id,
+    razorpay_order_id,
+    razorpay_signature,
+    internalOrderId
+  } = req.body;
+
+  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
     return res.status(400).json({ error: "Missing fields" });
   }
 
   try {
-    const generatedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || "")
+    // ✅ 1. Fetch order
+    const order = await new Promise((resolve, reject) => {
+      db.get(`SELECT * FROM orders WHERE id = ?`, [internalOrderId], (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+      });
+    });
+
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    // ✅ 2. Idempotency check
+    if (order.status === "Confirmed") {
+      return res.json({
+        success: true,
+        message: "Already processed",
+        shiprocketOrderId: order.shiprocket_order_id
+      });
+    }
+
+    // ✅ 3. Verify signature
+    const expected = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
 
-    if (generatedSignature !== razorpay_signature) {
-      return res.status(400).json({ error: "Signature verification failed" });
+    if (expected !== razorpay_signature) {
+      return res.status(400).json({ error: "Invalid signature" });
     }
 
-    // --- Update order status to Confirmed ---
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE orders 
-         SET status = ?, razorpay_payment_id = ?, updated_at = CURRENT_TIMESTAMP 
-         WHERE id = ? AND user_id = ?`,
-        ["Confirmed", razorpay_payment_id, internalOrderId, req.user.id],
-        function (err) {
-          if (err) return reject(err);
-          if (this.changes === 0) return reject(new Error("Order not found or not owned by user"));
-          resolve();
-        }
-      );
-    });
+    // ✅ 4. Validate order mapping
+    if (order.razorpay_order_id !== razorpay_order_id) {
+      return res.status(400).json({ error: "Order mismatch" });
+    }
 
-    // --- Increment sold count for each product in order ---
-    const orderItems = await new Promise((resolve, reject) => {
-      db.all(`SELECT product_id, quantity FROM order_items WHERE order_id = ?`, [internalOrderId], (err, rows) => {
+    // ✅ 5. Fetch payment from Razorpay
+    const payment = await razorpay.payments.fetch(razorpay_payment_id);
+
+    if (payment.status !== "captured") {
+      return res.status(400).json({ error: "Payment not captured" });
+    }
+
+    // ✅ 6. Get items
+    const items = await new Promise((resolve, reject) => {
+      db.all(`SELECT * FROM order_items WHERE order_id = ?`, [internalOrderId], (err, rows) => {
         if (err) return reject(err);
         resolve(rows || []);
       });
     });
 
-    for (const item of orderItems) {
-      await new Promise((resolve, reject) => {
-        db.run(
-          `UPDATE products 
-           SET sold = IFNULL(sold, 0) + ? 
-           WHERE id = ?`,
-          [item.quantity, item.product_id],
-          function (err) {
-            if (err) return reject(err);
-            resolve();
-          }
-        );
+    const address = JSON.parse(order.shipping_json);
+
+    // ✅ 7. Create Shiprocket order (SAFE)
+    let shiprocketOrder = null;
+
+    try {
+      shiprocketOrder = await createShiprocketOrder({
+        order_id: `ORDER-${internalOrderId}`,
+        order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
+        pickup_location: process.env.SHIPROCKET_PICKUP || "PRIMARY",
+        billing_customer_name: address.name || "Customer",
+        billing_address: address.address || "N/A",
+        billing_city: address.city,
+        billing_pincode: address.pincode,
+        billing_state: address.state,
+        billing_country: "India",
+        billing_email: address.email,
+        billing_phone: address.phone,
+        shipping_is_billing: true,
+        payment_method: "Prepaid",
+        sub_total: order.total_amount,
+        order_items: items.map(i => ({
+          name: `Product ${i.product_id}`,
+          sku: `SKU-${i.product_id}`,
+          units: i.quantity,
+          selling_price: i.unit_price,
+        })),
+        weight: 1,
       });
+    } catch (err) {
+      console.error("Shiprocket failed:", err);
     }
 
-    // --- Insert user activity ---
+    // ✅ 8. Update DB safely
     await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO user_activity (user_id, action) VALUES (?, ?)`,
-        [req.user.id, `Payment successful for order #${internalOrderId}`],
-        function (err) {
-          if (err) return reject(err);
-          resolve();
-        }
+        `UPDATE orders 
+         SET status = ?, razorpay_payment_id = ?, shiprocket_order_id = ?
+         WHERE id = ?`,
+        [
+          shiprocketOrder ? "Confirmed" : "Processing",
+          razorpay_payment_id,
+          shiprocketOrder?.order_id || null,
+          internalOrderId
+        ],
+        (err) => (err ? reject(err) : resolve())
       );
     });
 
-    // --- Fetch delivery_date ---
-    const deliveryDate = await new Promise((resolve, reject) => {
-      db.get(`SELECT delivery_date FROM orders WHERE id = ?`, [internalOrderId], (err, row) => {
-        if (err) return reject(err);
-        resolve(row?.delivery_date ?? null);
-      });
+    res.json({
+      success: true,
+      shiprocketOrderId: shiprocketOrder?.order_id || null
     });
 
-    res.json({ success: true, internalOrderId, razorpay_payment_id, deliveryDate });
   } catch (err) {
-    console.error("Razorpay verify error:", err?.message || err);
-    res.status(500).json({ error: "Failed to verify payment", details: err?.message || String(err) });
+    console.error(err);
+    res.status(500).json({ error: "Verification failed" });
   }
+});
+
+router.post("/razorpay/webhook", async (req, res) => {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+  const shasum = crypto.createHmac("sha256", secret);
+  shasum.update(JSON.stringify(req.body));
+
+  if (shasum.digest("hex") !== req.headers["x-razorpay-signature"]) {
+    return res.status(400).send("Invalid webhook");
+  }
+
+  const event = req.body.event;
+
+  if (event === "payment.captured") {
+    console.log("Webhook payment captured:", req.body.payload.payment.entity.id);
+    // You can trigger verify logic here
+  }
+
+  res.json({ status: "ok" });
 });
 
 export default router;
