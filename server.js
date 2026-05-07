@@ -55,15 +55,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 const isProduction = process.env.NODE_ENV === "production";
 
 const app = express();
-app.use(async (req, res, next) => {
-   const maintenance = await getMaintenanceStatus();
 
-   if (maintenance.enabled) {
-      return res.redirect(maintenance.url);
-   }
-
-   next();
-});
 // -------------------- Middleware & CORS --------------------
 if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
   app.set("trust proxy", 1);
@@ -1036,6 +1028,22 @@ app.use("/api/email", msg91EmailRoutes);
 // -------------------- Coupon Routes --------------------
 app.use("/api/coupons", couponsRoutes);
 
+
+app.get("/api/maintenance", async (req, res) => {
+  try {
+    const maintenance = await getMaintenanceStatus();
+
+    return res.json({
+      enabled: maintenance.enabled,
+    });
+  } catch (err) {
+    console.error(err);
+
+    return res.json({
+      enabled: false,
+    });
+  }
+});
 
 // -------------------- Root + Health --------------------
 app.get("/", (req, res) => res.send(`<h2>Dripzoid Backend</h2><p>API available. Use /api routes.</p>`));
